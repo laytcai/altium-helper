@@ -115,10 +115,42 @@ scope modes.
   `.PcbDoc`.
 - **Rendering sheets:** python-altium can render SVG (it needs a 2-line patch on Python 3.10+). Not needed yet.
 
-## 3. Open questions
+## 3. Found while building (2026-09-30)
+
+- **The Universal Netlist hash** is `SHA-256(JSON.stringify(canonical {nets, components}))`, computed in
+  JavaScript.
+  - JavaScript objects list integer-like keys (pin numbers) first and in numeric order, so a plain sorted-keys
+    JSON dump gives the wrong hash.
+  - Schema version 2 allows only these component fields: `mpn`, `internal_pn`, `manufacturer`, `description`,
+    `comment`, `value`, `dns` (true only) and `pins`. The reader drops any other field before checking the hash.
+  - `unformat.py` reproduces the hash exactly on real exports.
+- **Nexar details** (live schema):
+  - `desWorkspaces` is deprecated; use `desWorkspaceInfos { name url isDefault }`.
+  - `desProjects(workspaceUrl, first, after)` is paginated and carries `repositoryUrl`.
+  - `desComponentsByIds` returns a `DesComponent | DesErrorPayload` union.
+  - `desCommentThreads(projectId)` returns the threads with their comments.
+  - The identity server (`identity.nexar.com`) supports the `offline_access` scope and the refresh-token and
+    device-code grants.
+- **Git performance on the public UBC repo** (167 MB, many boards):
+  - A blobless clone takes 0.5 s and 300 KB.
+  - Checking out one board folder at an old revision into a sparse worktree takes 0.75 s and about 5 MB.
+  - Git 2.36 or newer is needed for `sparse-checkout --no-cone`.
+- **Real history.** The diff engine read UBC's "Reconfigured MCU pinout" commit as one pin swap, one 3-pin rotation
+  and six moves. It read "Replaced 3V3 power select diodes with jumpers" as D2 removed and 0 Ω R104/R105 added.
+- **A real Claude session** (headless `claude -p` with only these tools) got both kinds of question right:
+  - It explained that commit, and noticed the PCB wasn't updated in it.
+  - It traced SPI1 on the mainboard through series resistors to its far end.
+  - It loaded the `altium-boards` skill by itself.
+- **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`). `ToolError` lives in
+  `mcp.server.mcpserver.exceptions`.
+- **Node without installing Node.** `nodejs-wheel-binaries` (MIT) ships Node 24 as a Python wheel for Linux (glibc
+  2.28+ and musl), macOS and Windows. That makes Git and uv the only prerequisites.
+
+## 4. Open questions
 1. Which git sign-in does our workspace accept: email and password (route B), or only tokens?
 2. Will Altium register altium-helper as a public desktop client (route A)?
 3. Does our workspace have Admin → Developer (route C)?
 4. Does the user have an Altium Designer license assigned, which Nexar needs?
 5. Do Altium 365 repositories use Git LFS for large files? If so, clones need `git-lfs`.
 6. Which board and revision had the CAN-SPI MOSI/MISO swap?
+7. Does the Nexar Evaluation App allow the redirect `http://localhost:3000/login` and `offline_access`? `login` retries without `offline_access`.

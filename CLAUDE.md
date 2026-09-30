@@ -1,82 +1,102 @@
 # altium-helper
 
 Lets Claude read Penn Electric Racing's Altium 365 board designs and their history, read-only, on Linux, Windows and
-macOS, without Altium Designer. What the tool does, how it works and how to install it are in `README.md`.
-Verified facts and sources are in `docs/research.md`.
+macOS, without Altium Designer. `README.md` covers what it does, how it works and how to install it.
+`docs/research.md` has the verified facts behind the design.
+
+## Status (2026-09-30)
+Built and tested on public boards and on synthetic history, and registered with Claude Code in WSL.
+
+Not yet tried against the team's own Altium 365 workspace:
+- `altium-helper login` (Nexar browser sign-in);
+- git with the user's Altium password (route B).
+
+Possible next steps:
+- route A (Altium desktop sign-in, once Altium issues a client ID);
+- a standalone firmware pin checker, if the skill's recipe isn't enough.
 
 ## Rules
 - **Read-only toward Altium 365.**
-  - GraphQL: send queries only, never mutations. The API client refuses any document that contains `mutation`.
-  - Git: never push to an Altium 365 repository. Board clones get an invalid push URL and a `pre-push` hook that
-    always fails. Only clone, fetch, worktree and read commands are allowed.
-- **Never commit board data or secrets.** That covers Altium files, `*.netlist.json`, zips, `designs/`, tokens and
-  credentials. `.gitignore` and `hooks/pre-commit` enforce it. Test fixtures are generated at runtime; never add real
-  or public design files to the repo.
-- **Everything an agent reads from a design goes to the AI provider.** Some parts may be under sponsor NDA.
+  - `api.graphql` refuses any document containing `mutation` or `subscription`. Never weaken that.
+  - Never push to an Altium 365 repository. Board clones get an invalid push URL and a `pre-push` hook that
+    always fails. Only clone, fetch, fast-forward merge, worktree and read commands are allowed.
+- **Credentials go only to `*.altium.com`** (`boards._credentials_for`). They're passed as a URL-scoped header in
+  the environment: never on a command line, in a URL or in git config.
+- **Never commit board data or secrets.** That covers Altium files, `*.netlist.json`, zips, `designs/` and
+  credentials. `.gitignore` and `hooks/pre-commit` enforce it. Test designs are built at runtime (`unformat.build`)
+  or downloaded (`scripts/fetch_test_designs.py`); never add design files to the repo.
+- **Everything an agent reads from a design goes to the AI provider.** Some parts may be under sponsor NDA. Boards
+  in `exclude` must never be fetched by any route (`Board.ensure_allowed`).
 - **Cross-platform.**
-  - Use `pathlib` everywhere and no shell-only tricks.
-  - Run subprocesses with argument lists, never `shell=True`.
-  - Text files use LF line endings (see `.gitattributes`).
+  - Use `pathlib`, and run subprocesses with argument lists, never `shell=True`.
+  - Text files use LF line endings (`.gitattributes`).
+  - CI runs on Ubuntu and Windows.
 
-## Layout
-- `src/altium_helper/`: the package.
+## Layout (`src/altium_helper/`)
+- **Interfaces:**
   - `cli`: the `altium-helper` command.
-  - `mcp_server`: the tools Claude calls.
-  - `repo`, `history` and `diff`: git and revision comparison.
-  - `pcbdoc`: pad-to-net reader for `.PcbDoc` files.
-  - `netlist`: wrapper around universal-netlist.
-  - `api` and `nexar`: GraphQL clients.
-  - `config`: paths and settings.
-  - `setup_cmd`: registration with Claude.
-- `src/altium_helper/data/`: the pinned universal-netlist (`package.json` and `package-lock.json`) and the skill
-  template.
-- `scripts/`: developer helpers, such as downloading the public test boards.
-- `tests/`: pytest. Tests marked `network` download public boards.
-- `hooks/`: git hooks for this repository.
+  - `mcp_server`: the six read-only tools Claude calls. It falls back to the API when git fails.
+  - `setup_cmd`: finds `claude` (on PATH or bundled in an editor extension) and registers the servers and the
+    skill.
+- **Boards and history:**
+  - `boards`: board registry, blobless clones, sparse worktrees, cached per-revision analysis.
+  - `git`: runs git, handles credentials, adds the read-only guards.
+  - `history`: history and changes over a range.
+  - `diff`: netlist comparison (moves, swaps, rotations, renames, parts).
+  - `timeparse`: "yesterday" and friends.
+- **Reading designs:**
+  - `netlist`: installs (npm lockfile) and runs universal-netlist on the Node from `nodejs-wheel-binaries`.
+  - `checks` and `pcbdoc`: missing documents, and schematic vs PCB (`.PcbDoc` pad nets).
+  - `unformat`: writes Universal Netlist files, including universal-netlist's JavaScript-order content hash.
+- **Altium 365 access:**
+  - `api`: the query-only GraphQL client.
+  - `nexar`: browser sign-in (PKCE, localhost:3000).
+  - `cloud`: board discovery, comments, revisions, PCB snapshot.
+- **Settings:** `config` covers paths and settings (`config.json`) and credentials (`credentials.json`, 0600).
+- **Data:** `data/universal-netlist/` (the version pin) and `data/skill/SKILL.md`.
 
 User data lives outside the repo:
-- Board clones and caches go in the platform data dir: `~/.local/share/altium-helper` on Linux,
-  `%LOCALAPPDATA%\altium-helper` on Windows.
-- Settings and credentials go in the config dir: `~/.config/altium-helper` on Linux, `%APPDATA%\altium-helper` on
-  Windows.
+- board copies and caches in `~/.local/share/altium-helper` (Windows: `%LOCALAPPDATA%`);
+- settings in `~/.config/altium-helper` (Windows: `%APPDATA%`).
 
 ## Development
 ```bash
-uv sync                      # create .venv with dev dependencies
-uv run pytest                # tests; -m "not network" skips downloads
+uv sync                           # .venv with dev dependencies
+uv run pytest                     # all tests; -m "not network" skips npm and board downloads
 uv run black . && uv run isort .
-uv run altium-helper --help
+uv tool install --editable . && altium-helper setup    # use your working copy for real
 ```
+Tests point every data and config folder into `.pytest_cache` (see `tests/conftest.py`). The synthetic DAQ board
+repository fixture is there too.
 
 ## Git conventions
-- Keep `main` working. Make each change on a short-lived branch (`feat/...`, `fix/...`, `docs/...`), open a pull
-  request, and squash-merge it.
-- Commit subjects are imperative and capitalized, at most 72 characters, with no final period. The body explains why
-  when that isn't obvious.
-- Pin versions in git: `uv.lock` for Python, and `src/altium_helper/data/universal-netlist/package-lock.json` for
-  universal-netlist. Bump universal-netlist in its own PR and re-run the network tests.
-- Enable the hooks once per clone with `git config core.hooksPath hooks` (`altium-helper setup` does this).
+- Keep `main` working. Make each change on a short-lived branch (`feat/...`, `fix/...`, `docs/...`) and merge it as
+  one squashed commit.
+- Commit subjects are imperative and capitalized, at most 72 characters, with no final period. The body explains
+  why.
+- Version pins live in git: `uv.lock`, and `src/altium_helper/data/universal-netlist/package-lock.json`. Bump
+  universal-netlist in its own change and keep `tests/test_accuracy.py` passing.
 
 ## Facts that are easy to get wrong
 - **universal-netlist's trace tool** (`query_xnet_by_pin_name`):
-  - takes pin numbers (`U14.35`), not pin names;
-  - only walks through R, L, C and FB parts;
+  - takes pin numbers, not names;
+  - traces through R, L, C and FB parts only;
   - ignores junction dots;
-  - treats off-sheet connectors as global;
   - needs `design_variant` whenever the design defines variants.
-- **universal-netlist's standalone binary** updates itself on every start. That's why we install the npm package
-  instead.
-- **Nexar** only has the latest design, releases, a commit list and comments. It has no past revisions and no
-  schematic nets. Git is the only source of files and history.
-- **Multi-channel boards.** A `.PcbDoc` stores the logical designator (`SOURCEDESIGNATOR`, e.g. `J4` five times).
-  The physical designator is that value plus `_` plus the last element of `SOURCEHIERARCHICALPATH` (e.g.
-  `J4_U_bob_0`).
+
+  Its standalone binary updates itself on every start; we use the npm package instead.
+- **Universal Netlist hash.** It's computed with JavaScript's `JSON.stringify`: integer-like keys come first, in
+  numeric order. Unknown component fields are dropped before the check.
+- **Nexar** has the latest design, releases, a commit list and comments, but no past revisions and no schematic
+  nets. `desWorkspaces` is deprecated; use `desWorkspaceInfos`.
+- **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`).
+- **Multi-channel `.PcbDoc`** stores logical designators. The board designator is `SOURCEDESIGNATOR`, then `_`,
+  then the room name from `SOURCEHIERARCHICALPATH`.
 
 ## Firmware monorepo (Penn-Electric-Racing, locally `/home/lycai/Penn-Electric-Racing`)
-- **STM32 pin definitions:** `embedded/boards/*/*Pins.hpp`, e.g. `const Pin framMosi = PC12;`. There are about 180
-  active pins across 6 STM32 boards. Known mismatches: `BMSPins.hpp` `canRx`/`canTx` ("Swapped compared to
-  schematic").
-- **Ludwig (Raspberry Pi CM4):**
+- **STM32 pin definitions:** `embedded/boards/*/*Pins.hpp`, e.g. `const Pin framMosi = PC12;`. Known mismatch:
+  `BMSPins.hpp` `canRx`/`canTx` ("Swapped compared to schematic").
+- **Ludwig (CM4):**
   - `embedded/boards/ludwig/configs/firmware/config.txt`:
     - two MCP251xFD CAN controllers on SPI1;
     - chip selects on GPIO18 and GPIO16, interrupts on GPIO7 and GPIO12;
