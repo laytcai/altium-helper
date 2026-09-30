@@ -41,6 +41,9 @@ def config_dir() -> Path:
 
 
 def designs_dir() -> Path:
+    """Where board copies live; ``ALTIUM_HELPER_DESIGNS`` moves them (e.g. to another disk)."""
+    if override := os.environ.get("ALTIUM_HELPER_DESIGNS"):
+        return Path(override)
     return data_dir() / "designs"
 
 
