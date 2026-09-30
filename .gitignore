@@ -1,0 +1,38 @@
+# Board designs and anything made from them. Never commit these: they are the team's private designs
+# (some parts may be under sponsor NDA), and the public test boards have no license to redistribute.
+designs/
+test-designs/
+*.netlist.json
+*.PrjPcb
+*.PrjPCB
+*.PrjPcbStructure
+*.SchDoc
+*.PcbDoc
+*.SchLib
+*.PcbLib
+*.IntLib
+*.OutJob
+*.Harness
+*.zip
+
+# Secrets (Nexar client secret, Altium 365 tokens, passwords)
+.env
+*.token
+credentials*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node (universal-netlist is installed outside the repo, but keep stray installs out)
+node_modules/
+
+# Editors and OS
+.idea/
+.DS_Store
+Thumbs.db

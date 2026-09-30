@@ -1,0 +1,13 @@
+# LF everywhere, like the firmware repo, so scripts and hooks work on Linux, macOS and Windows.
+* text=auto eol=lf
+
+# Binary files git should never try to merge or normalize.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.SchDoc binary
+*.PcbDoc binary
+*.SchLib binary
+*.PcbLib binary
+*.IntLib binary
