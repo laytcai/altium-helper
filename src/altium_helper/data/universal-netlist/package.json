@@ -1,0 +1,8 @@
+{
+  "name": "altium-helper-universal-netlist",
+  "private": true,
+  "description": "Pins the universal-netlist version that altium-helper installs. Bump it in its own pull request.",
+  "dependencies": {
+    "@intelligentelectron/universal-netlist": "1.12.0"
+  }
+}

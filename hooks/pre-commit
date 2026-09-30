@@ -1,0 +1,12 @@
+#!/bin/sh
+# Refuse to commit board designs, anything made from them, or secrets (see CLAUDE.md).
+# Enable once per clone with: git config core.hooksPath hooks
+
+blocked=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE \
+    '\.(prjpcb|prjpcbstructure|schdoc|pcbdoc|schlib|pcblib|intlib|outjob|harness|zip)$|\.netlist\.json$|(^|/)(designs|test-designs)/|(^|/)\.env$|\.token$|(^|/)credentials[^/]*\.json$')
+
+if [ -n "$blocked" ]; then
+    echo "pre-commit: refusing to commit board files or secrets:" >&2
+    echo "$blocked" | sed 's/^/  /' >&2
+    exit 1
+fi

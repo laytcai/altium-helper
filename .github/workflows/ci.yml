@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - name: Cache the public test boards
+        uses: actions/cache@v6
+        with:
+          path: test-designs
+          key: test-designs-${{ hashFiles('scripts/fetch_test_designs.py') }}
+      - run: uv sync --locked
+      - run: uv run black --check .
+      - run: uv run isort --check-only .
+      - run: uv run pytest -v
