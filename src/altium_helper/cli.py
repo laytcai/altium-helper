@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, boards, checks, config, git, history, netlist, pcbdoc
+from . import (
+    __version__,
+    boards,
+    checks,
+    config,
+    git,
+    history,
+    netlist,
+    pcbdoc,
+    setup_cmd,
+)
 from .timeparse import parse_when
 
 
@@ -25,12 +36,42 @@ def _print(data: dict | list, as_json: bool, text: str) -> None:
 def cmd_setup(args: argparse.Namespace) -> int:
     version = netlist.install(force=args.force)
     print(f"universal-netlist {version} is installed in {netlist.install_dir()}")
+    command = setup_cmd.launcher()
+    if args.no_register:
+        print(setup_cmd.manual_instructions(command))
+    else:
+        claude = setup_cmd.find_claude()
+        if claude:
+            setup_cmd.register_claude(claude, command)
+            print(
+                f"Registered altium-helper and universal-netlist with Claude Code ({claude})"
+            )
+        else:
+            print("Claude Code not found.\n" + setup_cmd.manual_instructions(command))
+        if codex := shutil.which("codex"):
+            setup_cmd.register_codex(codex, command)
+            print("Registered them with Codex too")
+        print(
+            f"Installed the altium-boards skill in {setup_cmd.install_skill().parent}"
+        )
     root = _repo_root()
     if root:
         subprocess.run(
             ["git", "-C", str(root), "config", "core.hooksPath", "hooks"], check=False
         )
         print(f"Enabled this repository's git hooks ({root / 'hooks'})")
+    print(
+        "Next: run `altium-helper login`, then restart Claude so it loads the new tools."
+    )
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from . import (  # imported here: the MCP SDK is slow to load for other commands
+        mcp_server,
+    )
+
+    mcp_server.main()
     return 0
 
 
@@ -194,6 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument(
         "--force", action="store_true", help="reinstall universal-netlist"
     )
+    setup.add_argument(
+        "--no-register",
+        action="store_true",
+        help="don't touch Claude's settings; print the commands instead",
+    )
 
     add = command(
         "add-board",
@@ -246,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("design", help="a .PrjPcb (or .netlist.json)")
     export.add_argument("-o", "--output", help="output file ending in .netlist.json")
 
+    command("mcp", cmd_mcp, "run altium-helper's MCP server (Claude starts this)")
     command(
         "serve-netlist",
         cmd_serve_netlist,
@@ -266,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         git.GitError,
         netlist.NetlistError,
         pcbdoc.PcbDocError,
+        setup_cmd.SetupError,
         FileNotFoundError,
         ValueError,
     ) as e:
