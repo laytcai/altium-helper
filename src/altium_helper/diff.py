@@ -69,6 +69,47 @@ def _match_nets(
     return matched
 
 
+def _net_cycles(moved: list[dict], matched: dict[str, str]) -> list[dict]:
+    """Pins of one part that passed their nets around in a circle.
+
+    Two pins that traded nets are the classic swapped TX/RX or MOSI/MISO; three or more
+    form a rotation. In each result, ``pins[i]`` had ``nets[i]`` and now has the net
+    ``pins[i + 1]`` had.
+    """
+    by_ref = collections.defaultdict(list)
+    for change in moved:
+        by_ref[change["ref"]].append(change)
+    cycles = []
+    for changes in by_ref.values():
+        holders = collections.defaultdict(list)
+        for change in changes:
+            holders[matched.get(change["from"], change["from"])].append(change)
+        # The pin whose old net this pin now has, when exactly one pin had it.
+        takes_from = {
+            c["pin"]: holders[c["to"]][0] for c in changes if len(holders[c["to"]]) == 1
+        }
+        in_cycle: set[str] = set()
+        for start in changes:
+            if start["pin"] in in_cycle:
+                continue
+            chain, current = [start], takes_from.get(start["pin"])
+            while current is not None and current is not start:
+                if current["pin"] in in_cycle or current in chain:
+                    current = None
+                    break
+                chain.append(current)
+                current = takes_from.get(current["pin"])
+            if current is start and len(chain) >= 2:
+                in_cycle.update(c["pin"] for c in chain)
+                cycles.append(
+                    {
+                        "pins": [c["pin"] for c in chain],
+                        "nets": [c["from"] for c in chain],
+                    }
+                )
+    return cycles
+
+
 def _describe_pin(pin: Pin, names: dict[Pin, str]) -> str:
     ref, number = pin
     name = names.get(pin)
@@ -102,20 +143,9 @@ def diff_netlists(old: dict, new: dict) -> dict:
                 }
             )
 
-    # Two pins of one part that traded nets: the classic swapped TX/RX or MOSI/MISO.
-    swaps = []
-    by_ref = collections.defaultdict(list)
-    for change in moved:
-        by_ref[change["ref"]].append(change)
-    for changes in by_ref.values():
-        for i, a in enumerate(changes):
-            for b in changes[i + 1 :]:
-                a_to = matched.get(a["from"], a["from"])
-                b_to = matched.get(b["from"], b["from"])
-                if a["to"] == b_to and b["to"] == a_to:
-                    swaps.append(
-                        {"pins": [a["pin"], b["pin"]], "nets": [a["from"], b["from"]]}
-                    )
+    cycles = _net_cycles(moved, matched)
+    swaps = [c for c in cycles if len(c["pins"]) == 2]
+    rotations = [c for c in cycles if len(c["pins"]) > 2]
 
     def interesting(net: str, pins: frozenset[Pin]) -> bool:
         return len(pins) > 1 or not AUTO_NET.match(net)
@@ -154,6 +184,7 @@ def diff_netlists(old: dict, new: dict) -> dict:
     return {
         "moved_pins": moved,
         "swapped_pins": swaps,
+        "rotated_pins": rotations,
         "renamed_nets": [{"from": a, "to": b} for a, b in renamed],
         "added_nets": added_nets,
         "removed_nets": removed_nets,
@@ -174,9 +205,20 @@ def summarize(changes: dict, new: dict | None = None, limit: int = 40) -> list[s
         lines.append(
             f"Swapped: {swap['pins'][0]} and {swap['pins'][1]} traded nets {swap['nets'][0]} <-> {swap['nets'][1]}"
         )
-    swapped = {pin for swap in changes["swapped_pins"] for pin in swap["pins"]}
+    for rotation in changes.get("rotated_pins", []):
+        pins, nets = rotation["pins"], rotation["nets"]
+        steps = ", ".join(
+            f"{pin} {nets[i]} -> {nets[(i + 1) % len(pins)]}"
+            for i, pin in enumerate(pins)
+        )
+        lines.append(f"Rotated: {len(pins)} pins passed their nets around: {steps}")
+    in_cycles = {
+        pin
+        for cycle in changes["swapped_pins"] + changes.get("rotated_pins", [])
+        for pin in cycle["pins"]
+    }
     for move in changes["moved_pins"]:
-        if move["pin"] not in swapped:
+        if move["pin"] not in in_cycles:
             lines.append(f"Moved: {move['pin']} from {move['from']} to {move['to']}")
     for rename in changes["renamed_nets"]:
         lines.append(f"Net renamed: {rename['from']} -> {rename['to']}")

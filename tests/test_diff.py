@@ -79,3 +79,19 @@ def test_single_pin_nets_altium_named_are_not_noise():
     changes = diff.diff_netlists(netlist(old), netlist(new))
     assert changes["added_nets"] == []
     assert {m["pin"] for m in changes["moved_pins"]} == {"U3.13 (PB13)", "U4.4"}
+
+
+def test_three_pins_passing_nets_around_are_a_rotation():
+    old = {
+        "U1": {"pins": {"1": "A", "2": "B", "3": "C"}},
+        "J1": {"pins": {"1": "A", "2": "B", "3": "C"}},
+    }
+    new = {"U1": {"pins": {"1": "B", "2": "C", "3": "A"}}, "J1": old["J1"]}
+    changes = diff.diff_netlists(netlist(old), netlist(new))
+    assert changes["swapped_pins"] == []
+    assert changes["rotated_pins"] == [
+        {"pins": ["U1.1", "U1.2", "U1.3"], "nets": ["A", "B", "C"]}
+    ]
+    assert diff.summarize(changes) == [
+        "Rotated: 3 pins passed their nets around: U1.1 A -> B, U1.2 B -> C, U1.3 C -> A"
+    ]
