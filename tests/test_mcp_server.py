@@ -76,6 +76,7 @@ def test_tools_are_listed_and_read_only(client):
         "get_board",
         "board_history",
         "board_changes",
+        "board_comments",
         "check_board",
     }
     assert all(t["annotations"]["readOnlyHint"] for t in tools.values())

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -11,12 +13,15 @@ from pathlib import Path
 
 from . import (
     __version__,
+    api,
     boards,
     checks,
+    cloud,
     config,
     git,
     history,
     netlist,
+    nexar,
     pcbdoc,
     setup_cmd,
 )
@@ -66,6 +71,155 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ask(prompt: str, secret: bool = False) -> str:
+    if not sys.stdin.isatty():
+        raise ValueError(f"{prompt.strip(': ')} is needed; run this in a terminal")
+    return (getpass.getpass(prompt) if secret else input(prompt)).strip()
+
+
+def _choose_workspace(spaces: list[dict], wanted: str | None) -> dict:
+    if not spaces:
+        raise api.ApiError("Your Altium account isn't in any Altium 365 workspace")
+    if wanted:
+        matches = [
+            s
+            for s in spaces
+            if wanted.lower() in s["url"].lower() or wanted.lower() in s["name"].lower()
+        ]
+        if len(matches) != 1:
+            names = ", ".join(s["name"] for s in spaces)
+            raise ValueError(
+                f"--workspace {wanted!r} matches {len(matches)} of: {names}"
+            )
+        return matches[0]
+    if len(spaces) == 1:
+        return spaces[0]
+    for number, space in enumerate(spaces, 1):
+        default = " (default)" if space.get("isDefault") else ""
+        print(f"  {number}. {space['name']}  {space['url']}{default}")
+    fallback = next((i for i, s in enumerate(spaces, 1) if s.get("isDefault")), 1)
+    answer = _ask(f"Which workspace has the team's boards? [{fallback}] ") or str(
+        fallback
+    )
+    return spaces[int(answer) - 1]
+
+
+def _setup_git(mode: str | None, with_git: list[dict]) -> None:
+    """Sign git in to Altium 365 and test it on one board; keep nothing that doesn't work."""
+    settings = config.Settings.load()
+    if not with_git:
+        print(
+            "None of the boards has a git repository, so the tools will use PCB data only."
+        )
+        return
+    url = with_git[0]["git_url"]
+    if settings.git_auth != "token":
+        if mode is None:
+            if not sys.stdin.isatty():
+                mode = "skip"
+            else:
+                answer = _ask("Try git with your Altium email and password? [Y/n] ")
+                mode = "skip" if answer.lower().startswith("n") else "password"
+        if mode == "skip":
+            print(
+                "Skipped git sign-in: until git works, the tools use PCB data from "
+                "Altium 365 (no schematic history)."
+            )
+            return
+        credentials = config.load_credentials()
+        credentials["git"] = {
+            "username": _ask("Altium account email: "),
+            "password": _ask("Altium password: ", secret=True),
+        }
+        config.save_credentials(credentials)
+        settings.git_auth = "password"
+        settings.save()
+    print(f"Testing git on {with_git[0]['name']} ...")
+    ok, message = boards.test_git_access(url)
+    if ok:
+        print(
+            "Git can read the boards. Every question gets the full design and its history."
+        )
+        return
+    if settings.git_auth == "password":
+        credentials = config.load_credentials()
+        credentials.pop("git", None)
+        config.save_credentials(credentials)
+        settings.git_auth = "none"
+        settings.save()
+    print(
+        f"Altium's git server refused the sign-in:\n  {message.splitlines()[0]}\n"
+        "Until git works, the tools use PCB data from Altium 365 (no schematic history).\n"
+        "Other ways in are in the README, under 'Getting into Altium 365'."
+    )
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    settings = config.Settings.load()
+    credentials = config.load_credentials()
+    if args.token:
+        workspace = args.workspace or _ask(
+            "Altium 365 workspace URL (e.g. https://yourteam.365.altium.com): "
+        )
+        token = os.environ.get("ALTIUM365_TOKEN") or _ask(
+            "Altium 365 API token (from a workspace admin): ", secret=True
+        )
+        credentials["altium365"] = {"token": token}
+        credentials["git"] = {"username": "token", "password": token}
+        config.save_credentials(credentials)
+        settings.api, settings.git_auth = "altium365", "token"
+        settings.workspace_url = workspace.rstrip("/")
+        settings.save()
+    else:
+        stored = credentials.get("nexar", {})
+        client_id = (
+            args.client_id
+            or os.environ.get("NEXAR_CLIENT_ID")
+            or stored.get("client_id")
+            or _ask("Nexar app client ID: ")
+        )
+        client_secret = (
+            args.client_secret
+            or os.environ.get("NEXAR_CLIENT_SECRET")
+            or stored.get("client_secret")
+            or _ask("Nexar app client secret: ", secret=True)
+        )
+        nexar.login(client_id, client_secret)
+        settings = config.Settings.load()
+        settings.api = "nexar"
+        settings.save()
+        chosen = _choose_workspace(cloud.workspaces(), args.workspace)
+        settings.workspace_url = chosen["url"]
+        settings.save()
+        print(f"Signed in. Workspace: {chosen['name']} ({chosen['url']})")
+    entries = cloud.discover_boards()
+    with_git = [e for e in entries if e["git_url"]]
+    names = ", ".join(e["name"] for e in entries[:25])
+    more = f" and {len(entries) - 25} more" if len(entries) > 25 else ""
+    print(
+        f"Found {len(entries)} boards ({len(with_git)} with a git repository): {names}{more}"
+    )
+    _setup_git(args.git, with_git)
+    print("Done. Ask Claude about a board, e.g. 'what changed on <board> yesterday?'")
+    return 0
+
+
+def cmd_comments(args: argparse.Namespace) -> int:
+    board = boards.find(args.board)
+    board.ensure_allowed()
+    threads = cloud.comments(board)
+    lines = []
+    for thread in threads:
+        state = "open" if thread["open"] else "resolved"
+        lines.append(
+            f"#{thread['thread']} ({state}, {thread['document'] or 'project'})"
+        )
+        for comment in thread["comments"]:
+            lines.append(f"  {comment['at'][:16]} {comment['by']}: {comment['text']}")
+    _print(threads, args.json, "\n".join(lines) or f"No comments on {board.name}.")
+    return 0
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     from . import (  # imported here: the MCP SDK is slow to load for other commands
         mcp_server,
@@ -91,6 +245,8 @@ def cmd_add_board(args: argparse.Namespace) -> int:
 
 
 def cmd_boards(args: argparse.Namespace) -> int:
+    if args.refresh:
+        cloud.discover_boards()
     rows = []
     for board in sorted(boards.all_boards().values(), key=lambda b: b.name.lower()):
         meta = board.meta()
@@ -253,7 +409,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument("--name", help="display name")
 
-    command("boards", cmd_boards, "list known boards", json_flag=True)
+    login = command(
+        "login", cmd_login, "sign in to Altium 365, find the boards, set up git"
+    )
+    login.add_argument(
+        "--token",
+        action="store_true",
+        help="use an Altium 365 API token from a workspace admin instead of Nexar",
+    )
+    login.add_argument("--workspace", help="workspace URL or name, if you have several")
+    login.add_argument("--client-id", help="Nexar app client ID (or NEXAR_CLIENT_ID)")
+    login.add_argument(
+        "--client-secret", help="Nexar app client secret (or NEXAR_CLIENT_SECRET)"
+    )
+    login.add_argument(
+        "--git",
+        choices=["password", "skip"],
+        help="git sign-in: your Altium email and password, or skip",
+    )
+
+    listing = command("boards", cmd_boards, "list known boards", json_flag=True)
+    listing.add_argument(
+        "--refresh", action="store_true", help="fetch the board list from Altium 365"
+    )
+
+    comments = command(
+        "comments", cmd_comments, "show a board's Altium 365 comments", json_flag=True
+    )
+    comments.add_argument("board")
 
     sync = command("sync", cmd_sync, "fetch a board's latest revisions now")
     sync.add_argument("board", nargs="?", help="board name")
@@ -309,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except (
+        api.ApiError,
         boards.BoardError,
         git.GitError,
         netlist.NetlistError,

@@ -54,6 +54,17 @@ def _credentials_for(url: str) -> git.Credentials | None:
     return None
 
 
+def test_git_access(url: str) -> tuple[bool, str]:
+    """Can git read ``url`` with the saved sign-in? Returns (ok, git's message)."""
+    try:
+        git.run(
+            ["ls-remote", "--heads", url], url=url, credentials=_credentials_for(url)
+        )
+    except git.GitError as e:
+        return False, str(e)
+    return True, "ok"
+
+
 @dataclass
 class Board:
     key: str
@@ -113,8 +124,8 @@ class Board:
     def cloned(self) -> bool:
         return (self.repo / ".git").exists()
 
-    def sync(self, force: bool = False) -> dict:
-        """Clone the board, or fetch new revisions if the copy is older than the sync interval."""
+    def ensure_allowed(self) -> None:
+        """Refuse boards on the exclude list, whatever route would fetch them."""
         settings = config.Settings.load()
         if any(
             self.key == slug(x) or self.name.lower() == x.lower()
@@ -123,6 +134,13 @@ class Board:
             raise BoardError(
                 f"{self.name} is in the exclude list, so it's never fetched"
             )
+
+    def sync(self, force: bool = False) -> dict:
+        """Clone the board, or fetch new revisions if the copy is older than the sync interval."""
+        self.ensure_allowed()
+        if not self.git_url:
+            raise BoardError(f"Altium 365 has no git repository for {self.name}")
+        settings = config.Settings.load()
         updated = False
         if not self.cloned():
             self._clone()
