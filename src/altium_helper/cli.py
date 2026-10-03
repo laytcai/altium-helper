@@ -259,6 +259,7 @@ def cmd_boards(args: argparse.Namespace) -> int:
             {
                 "key": board.key,
                 "name": board.name,
+                "project_id": board.project_id,
                 "last_sync": meta.get("last_sync"),
                 "head": meta.get("head"),
             }
@@ -266,6 +267,7 @@ def cmd_boards(args: argparse.Namespace) -> int:
     text = "\n".join(
         f"{r['key']:<24} {r['name']:<32} "
         + (f"synced {r['last_sync'][:16]}" if r["last_sync"] else "not fetched yet")
+        + (f"  {r['project_id']}" if r["project_id"] else "")
         for r in rows
     )
     _print(
@@ -278,7 +280,12 @@ def cmd_boards(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    targets = boards.all_boards().values() if args.all else [boards.find(args.board)]
+    if args.all:  # every board already fetched; not every project in the workspace
+        targets = [b for b in boards.all_boards().values() if b.cloned()]
+        if not targets:
+            print("No boards fetched yet. Fetch one with: altium-helper sync <board>")
+    else:
+        targets = [boards.find(args.board)]
     for board in targets:
         result = board.sync(force=True)
         head = result["latest_revision"]
@@ -445,7 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = command("sync", cmd_sync, "fetch a board's latest revisions now")
     sync.add_argument("board", nargs="?", help="board name")
-    sync.add_argument("--all", action="store_true", help="every known board")
+    sync.add_argument("--all", action="store_true", help="every board fetched before")
 
     log = command("history", cmd_history, "list a board's commits", json_flag=True)
     log.add_argument("board")

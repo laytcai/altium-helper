@@ -194,7 +194,9 @@ Most commands also take `--json`.
 | Settings (`config.json`) and credentials (`credentials.json`, private to you) | `~/.config/altium-helper/` | `%APPDATA%\altium-helper\` |
 
 `ALTIUM_HELPER_DESIGNS`, `ALTIUM_HELPER_DATA` and `ALTIUM_HELPER_CONFIG` move these. `config.json` also holds
-`exclude`, a list of boards that must never be fetched.
+`exclude`, a list of boards that must never be fetched, by name, key or project id. When several projects share a
+name, use the project id (`altium-helper boards` shows it): a key can move to another project when Altium lists
+them in a different order.
 
 **Updating:**
 ```bash

@@ -17,6 +17,16 @@ from urllib.parse import urlsplit
 
 PUSH_DISABLED = "DISABLED-altium-helper-is-read-only"
 
+# Give up on a connection that has sent nothing for 10 minutes, so a stalled fetch can't
+# hold a board forever. Altium's server sends nothing while it builds a download: up to
+# a minute is normal, and about 5 minutes has been seen.
+NETWORK_SETTINGS = {"http.lowSpeedLimit": "1", "http.lowSpeedTime": "600"}
+# No background upkeep: since git 2.29, fetch and merge start it, detached, and newer
+# gits repack and rewrite .git/shallow there while our next command runs, failing it
+# ("shallow file has changed since we read it"). Boards repack in the foreground
+# instead (Board._tidy).
+SETTINGS = {"maintenance.auto": "false", "gc.auto": "0"}
+
 PRE_PUSH_HOOK = """#!/bin/sh
 echo "altium-helper: this is a read-only copy of an Altium 365 project; pushing is disabled." >&2
 exit 1
@@ -44,14 +54,19 @@ def _environment(url: str | None, credentials: Credentials | None) -> dict[str, 
     env["GIT_TERMINAL_PROMPT"] = "0"  # never wait for a password prompt
     env["GCM_INTERACTIVE"] = "Never"  # nor for Git Credential Manager's window
     env.setdefault("LC_ALL", "C")  # messages we can match on
+    settings = {**SETTINGS, **(NETWORK_SETTINGS if url else {})}
     if credentials and url:
         parts = urlsplit(url)
         if parts.scheme in ("http", "https"):
             scope = f"{parts.scheme}://{parts.netloc.rsplit('@', 1)[-1]}/"
-            count = int(env.get("GIT_CONFIG_COUNT", "0"))
-            env[f"GIT_CONFIG_KEY_{count}"] = f"http.{scope}.extraHeader"
-            env[f"GIT_CONFIG_VALUE_{count}"] = credentials.header()
-            env["GIT_CONFIG_COUNT"] = str(count + 1)
+            settings[f"http.{scope}.extraHeader"] = credentials.header()
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for key, value in settings.items():
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    if settings:
+        env["GIT_CONFIG_COUNT"] = str(count)
     return env
 
 
@@ -61,17 +76,24 @@ def run(
     *,
     url: str | None = None,
     credentials: Credentials | None = None,
+    keep_fds: tuple[int, ...] = (),
 ) -> str:
-    """Run ``git`` and return its standard output. Raises GitError on failure."""
+    """Run ``git`` and return its standard output. Raises GitError on failure.
+
+    ``keep_fds`` stay open in git (POSIX only): a held lock passed this way stays held
+    until git exits, even if this process dies first.
+    """
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=cwd,
+            stdin=subprocess.DEVNULL,  # never the MCP server's stdin, which is its JSON-RPC pipe
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             env=_environment(url, credentials),
+            pass_fds=keep_fds if sys.platform != "win32" else (),
         )
     except FileNotFoundError as e:
         raise GitError("git isn't installed or isn't on PATH") from e

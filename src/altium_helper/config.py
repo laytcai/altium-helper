@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -98,13 +101,44 @@ def load_credentials() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+_SAVING = threading.Lock()
+
+
 def save_credentials(credentials: dict) -> None:
     """Write credentials readable only by the current user."""
-    path = config_dir() / "credentials.json"
+    with _SAVING:  # parallel tool calls save one at a time
+        write_file(
+            config_dir() / "credentials.json",
+            json.dumps(credentials, indent=2) + "\n",
+            private=True,
+        )
+
+
+def write_file(path: Path, text: str, private: bool = False) -> None:
+    """Replace ``path`` in one step, so no reader ever sees half a file.
+
+    ``private``: readable only by the current user (on Windows the per-user profile
+    folder already is).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(credentials, indent=2) + "\n", encoding="utf-8")
-    # On Windows the per-user profile folder is already private.
-    if sys.platform != "win32":
-        tmp.chmod(0o600)
-    tmp.replace(path)
+    # A temporary file of its own, so writes from other processes can't collide.
+    handle, name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=path.parent
+    )
+    tmp = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(text)
+        if private and sys.platform != "win32":
+            tmp.chmod(0o600)
+        for attempt in range(50):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:
+                # Windows refuses while another handle has the file open.
+                if sys.platform != "win32" or attempt == 49:
+                    raise
+                time.sleep(0.02)
+    finally:
+        tmp.unlink(missing_ok=True)

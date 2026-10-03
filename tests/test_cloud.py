@@ -261,3 +261,17 @@ def test_an_excluded_board_gets_no_fallback(unreachable_board, monkeypatch):
     monkeypatch.setattr(api.urllib.request, "urlopen", pytest.fail)
     with pytest.raises(ToolError, match="exclude"):
         mcp_server.get_board("pdu")
+
+
+def test_a_board_can_be_excluded_by_its_project_id(unreachable_board, monkeypatch):
+    """A project id never moves, unlike a key when two projects share a name."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from altium_helper import mcp_server
+
+    settings = config.Settings.load()
+    settings.exclude = ["P9"]
+    settings.save()
+    monkeypatch.setattr(api.urllib.request, "urlopen", pytest.fail)
+    with pytest.raises(ToolError, match="exclude"):
+        mcp_server.get_board("pdu")
