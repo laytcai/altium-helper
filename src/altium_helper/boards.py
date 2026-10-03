@@ -4,8 +4,9 @@ Each board is a git repository. A first clone holds only the latest revision
 (``--depth=1``): Altium 365's git server can't leave file contents out of a clone (it
 has no partial clone), and most of a board's history is old versions of large binary
 files. Older history is fetched when a tool needs it, only as far back as it needs.
-Past revisions are checked out into temporary worktrees that hold just the project's
-folder.
+Past revisions are read from temporary folders holding just the project's folder,
+written by git archive, which only reads the repository, so several revisions can be
+read at once.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import re
 import shutil
 import stat
 import sys
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass
@@ -45,6 +47,8 @@ COMPLETE_MARKER = "altium-helper-complete"
 DOWNLOADED_MARKER = "altium-helper-downloaded"
 # Repack a copy once it has this many packs (each fetch adds one); git's own limit.
 MAX_PACKS = 50
+# A temporary revision folder older than this was left by a process that died.
+STALE_SNAPSHOT_SECONDS = 3600
 # A git lock file older than this was left by a git that died. On POSIX, network git
 # commands hold the board lock until they exit (see _exclusive), so any lock file found
 # while holding it is stale once a short local command could have finished. Windows
@@ -204,9 +208,13 @@ class Board:
     # ------------------------------------------------------------------- sync
 
     def _lock(self) -> contextlib.AbstractContextManager[tuple[int, ...]]:
-        """One clone, fetch or analysis of this board at a time, in any process.
+        """One clone or fetch of this board at a time, in any process.
 
         Claude often calls two tools at once, and both may be first to fetch a board.
+        Analyses don't take it: each revision has its own lock, and they only read the
+        repository. So nothing done under this lock may delete objects or the copy
+        while an analysis could be reading it, except re-cloning a copy no analysis
+        can use.
         """
         return _exclusive(self.root / ".lock")
 
@@ -603,47 +611,53 @@ class Board:
         return commits
 
     @contextlib.contextmanager
-    def worktree(self, rev: str) -> Iterator[Path]:
-        """A temporary checkout of ``rev`` holding only the project's folder."""
+    def snapshot(self, rev: str) -> Iterator[Path]:
+        """A temporary folder holding the project's folder as it was at commit ``rev``.
+
+        Written by git archive, which only reads the repository: snapshots of several
+        revisions can be made at once, where parallel git worktrees can fail.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
-        tree = Path(tempfile.mkdtemp(prefix="rev-", dir=self.root))
+        for stale in self.root.glob("rev-*"):  # left by a process that died
+            with contextlib.suppress(OSError):
+                if time.time() - stale.stat().st_mtime > STALE_SNAPSHOT_SECONDS:
+                    shutil.rmtree(stale, ignore_errors=True)
+        folder = Path(tempfile.mkdtemp(prefix="rev-", dir=self.root))
         try:
-            self._git(
-                [
-                    "worktree",
-                    "add",
-                    "--quiet",
-                    "--no-checkout",
-                    "--detach",
-                    str(tree),
-                    rev,
-                ]
-            )
-            self._sparse(tree)
-            self._git(["checkout", "--quiet"], tree)
+            archive = folder / "revision.tar"
+            paths = [] if self.project_folder == "." else ["--", self.project_folder]
+            tree = folder / "tree"
+            if paths and not self._git(["ls-tree", "-d", "--name-only", rev, *paths]):
+                tree.mkdir()  # the project's folder doesn't exist at this revision
+                yield tree
+                return
+            self._git(["archive", "--format=tar", f"--output={archive}", rev, *paths])
+            with tarfile.open(archive) as tar:
+                if hasattr(tarfile, "data_filter"):  # Python 3.12, 3.11.4, 3.10.12
+                    tar.extractall(tree, filter="data")
+                else:
+                    tar.extractall(tree)
+            archive.unlink()
             yield tree
         finally:
-            with contextlib.suppress(git.GitError):
-                self._git(["worktree", "remove", "--force", str(tree)])
-            shutil.rmtree(tree, ignore_errors=True)
-            with contextlib.suppress(git.GitError):
-                self._git(["worktree", "prune"])
+            shutil.rmtree(folder, ignore_errors=True)
 
     def analyze(self, rev: str) -> dict:
         """Netlist and schematic-vs-PCB check of one revision, cached by commit.
 
         Returns ``{"rev", "netlist_path", "netlist", "check"}``; ``netlist`` is None when the
-        project doesn't exist at that revision.
+        project doesn't exist at that revision. Different revisions can be analyzed at once.
         """
         full = self.find_commit(rev)
         if not full:
             raise BoardError(f"{self.name}: no revision {rev!r}")
-        with self._lock():  # a parallel call waits, then reads the cache
-            self.revisions_dir.mkdir(parents=True, exist_ok=True)
-            netlist_path = self.revisions_dir / f"{full}.netlist.json"
-            check_path = self.revisions_dir / f"{full}.check.json"
+        self.revisions_dir.mkdir(parents=True, exist_ok=True)
+        netlist_path = self.revisions_dir / f"{full}.netlist.json"
+        check_path = self.revisions_dir / f"{full}.check.json"
+        # A parallel call on the same revision waits, then reads the cache.
+        with _exclusive(self.revisions_dir / "locks" / f"{full}.lock"):
             if not netlist_path.exists() or not check_path.exists():
-                with self.worktree(full) as tree:
+                with self.snapshot(full) as tree:
                     design = tree / self.project_file
                     if not design.exists():
                         return {
@@ -653,8 +667,11 @@ class Board:
                             "check": None,
                         }
                     _refuse_lfs_pointers(tree / self.project_folder)
-                    netlist.export_json(design, netlist_path)
-                    loaded = json.loads(netlist_path.read_text(encoding="utf-8"))
+                    # Written under a temporary name, so a reader never sees half a file.
+                    exported = netlist.export_json(
+                        design, tree.parent / "design.netlist.json"
+                    )
+                    loaded = json.loads(exported.read_text(encoding="utf-8"))
                     if design.suffix.lower() == ".prjpcb":
                         report = checks.check_project(design, netlist=loaded)
                     else:  # a netlist file (e.g. from Nexar) has no documents or PCB
@@ -664,9 +681,10 @@ class Board:
                             "missing_documents": [],
                             "pcb": [],
                         }
-                    check_path.write_text(
-                        json.dumps(report, indent=2), encoding="utf-8"
-                    )
+                    os.replace(exported, netlist_path)
+                    pending = tree.parent / "check.json"
+                    pending.write_text(json.dumps(report, indent=2), encoding="utf-8")
+                    os.replace(pending, check_path)
             return {
                 "rev": full[:10],
                 "netlist_path": str(netlist_path),

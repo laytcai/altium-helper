@@ -394,3 +394,36 @@ def test_many_fetches_get_repacked(board, add_commit, monkeypatch):
     packs = list((board.repo / ".git" / "objects" / "pack").glob("*.pack"))
     assert len(packs) == 1
     assert board_changes(board)["commits"][0]["changes"][0].startswith("Swapped:")
+
+
+def test_a_revision_from_before_the_board_folder_existed(
+    tmp_path, monkeypatch, universal_netlist
+):
+    """The project lives in board/, which the repository's first commit didn't have."""
+    monkeypatch.setenv("ALTIUM_HELPER_DESIGNS", str(tmp_path / "designs"))
+    monkeypatch.setenv("ALTIUM_HELPER_CONFIG", str(tmp_path / "config"))
+    origin = _repository(tmp_path / "origin", {"docs/README.txt": "Notes\n"})
+    design = origin / DESIGN
+    design.parent.mkdir()
+    design.write_bytes(b"")
+    from altium_helper import unformat
+
+    unformat.write(design, unformat.build({"R1": {"pins": {"1": "A", "2": "B"}}}))
+    identity = ["-c", "user.name=Dana", "-c", "user.email=dana@example.com"]
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(origin), *identity, "-c", "commit.gpgsign=false"]
+        + ["commit", "-q", "-m", "Add the board"],
+        check=True,
+    )
+    settings = config.Settings.load()
+    settings.boards["daq"] = config.BoardConfig(
+        git_url=str(origin), project_file=DESIGN, name="DAQ"
+    )
+    settings.save()
+    board = boards.find("daq")
+    board.sync()
+    first = board.resolve("HEAD^")
+    assert board.analyze(first)["netlist"] is None
+    result = board_changes(board, from_rev=first)
+    assert "Part added: R1" in result["commits"][0]["changes"]

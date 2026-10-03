@@ -104,7 +104,7 @@ comments. Git is the only way to get the files and past revisions: Altium's APIs
 |---|---|---|
 | [universal-netlist](https://github.com/IntelligentElectron/universal-netlist) | Reading Altium projects; connectivity queries | 1.12.0, pinned by a committed npm lockfile. Apache-2.0 |
 | [nodejs-wheel-binaries](https://github.com/njzjz/nodejs-wheel) | The Node.js that runs universal-netlist, installed by uv like any Python package, so nobody installs Node | Node 24. MIT |
-| Git | Board copies and history (shallow clones, sparse worktrees) | 2.36 or newer |
+| Git | Board copies and history (shallow clones; past revisions through git archive) | 2.36 or newer |
 | [Nexar API](https://nexar.com) and the Altium 365 API | Sign-in, board list, git URLs, commit list, comments, PCB fallback (queries only) | — |
 | [MCP Python SDK](https://pypi.org/project/mcp/) | altium-helper's MCP server | 2.x. MIT |
 | [olefile](https://github.com/decalage2/olefile) | Reading `.PcbDoc` files for the schematic-vs-PCB check | 0.47. BSD-2-Clause |
@@ -243,8 +243,9 @@ it started with.
     (`--unshallow`).
   - Later requests fetch only new commits, at most every 5 minutes.
   - A copy whose first clone was interrupted is cloned again.
-- **Past revisions** are read from a temporary worktree holding just the project's folder. The netlist and the PCB
-  check of each revision are cached by commit.
+- **Past revisions** are read from a temporary folder holding just the project's folder, written by git archive,
+  so several are read at once. Only commits that change the schematic or project files are analyzed. The netlist
+  and the PCB check of each revision are cached by commit.
 - **Read-only.** Clones get an invalid push URL and a `pre-push` hook that always fails. The tool runs only clone,
   fetch, fast-forward and read commands. If a copy has local edits, sync stops instead of overwriting them.
 - **Credentials** reach git only through a URL-scoped header in the environment, and only for `*.altium.com`

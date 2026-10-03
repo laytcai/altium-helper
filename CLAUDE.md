@@ -18,7 +18,7 @@ Possible next steps:
 - **Read-only toward Altium 365.**
   - `api.graphql` refuses any document containing `mutation` or `subscription`. Never weaken that.
   - Never push to an Altium 365 repository. Board clones get an invalid push URL and a `pre-push` hook that
-    always fails. Only clone, fetch, fast-forward merge, worktree and read commands are allowed.
+    always fails. Only clone, fetch, fast-forward merge and read commands (such as archive) are allowed.
 - **Credentials go only to `*.altium.com`** (`boards._credentials_for`). They're passed as a URL-scoped header in
   the environment: never on a command line, in a URL or in git config.
 - **Never commit board data or secrets.** That covers Altium files, `*.netlist.json`, zips, `designs/` and
@@ -40,8 +40,8 @@ Possible next steps:
   - `setup_cmd`: finds `claude` (on PATH or bundled in an editor extension) and registers the servers and the
     skill.
 - **Boards and history:**
-  - `boards`: board registry, shallow clones with history fetched on demand, sparse worktrees, cached
-    per-revision analysis.
+  - `boards`: board registry, shallow clones with history fetched on demand, cached per-revision analysis
+    (revisions read with git archive, several at once).
   - `git`: runs git, handles credentials, adds the read-only guards.
   - `history`: history and changes over a range.
   - `diff`: netlist comparison (moves, swaps, rotations, renames, parts).
@@ -92,8 +92,11 @@ repository fixture is there too.
 - **Nexar** has the latest design, releases, a commit list and comments, but no past revisions and no schematic
   nets. `desWorkspaces` is deprecated; use `desWorkspaceInfos`.
 - **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`). It runs plain (non-async) tools
-  on worker threads, so parallel tool calls really run at once: anything touching a board's files goes through
-  `Board._lock`.
+  on worker threads, so parallel tool calls really run at once:
+  - clones, fetches and history fetches of a board go through `Board._lock`;
+  - each revision's analysis has its own lock and only reads the repository (git archive), so analyses run while
+    the board is fetched. Nothing under `Board._lock` may delete objects or the copy while an analysis could be
+    reading it.
 - **Altium 365's git server** (Git for Windows behind ASP.NET, protocol v0 only):
   - has no partial clone: `--filter=blob:none` silently downloads every version of every file, and `--quiet`
     hides git's warning;
