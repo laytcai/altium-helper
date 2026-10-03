@@ -4,7 +4,8 @@ import pytest
 
 from altium_helper.timeparse import parse_when
 
-NOW = datetime(2026, 9, 30, 15, 30, tzinfo=timezone(timedelta(hours=-4)))
+# Phrases are read in the machine's own time zone (CI runs in UTC), so "now" is local too.
+NOW = datetime(2026, 9, 30, 15, 30).astimezone()
 
 
 @pytest.mark.parametrize(
