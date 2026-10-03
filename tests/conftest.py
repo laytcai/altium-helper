@@ -89,7 +89,10 @@ def _commit(
         "GIT_AUTHOR_DATE": when.isoformat(),
         "GIT_COMMITTER_DATE": when.isoformat(),
     }
-    for args in (["add", "-A"], ["commit", "-q", "-m", message]):
+    for args in (
+        ["add", "-A"],
+        ["commit", "-q", "--allow-empty-message", "-m", message],
+    ):
         subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
 
 
@@ -121,6 +124,17 @@ def daq_origin(tmp_path):
         yesterday + timedelta(hours=20),
     )
     return repo
+
+
+@pytest.fixture
+def add_commit(daq_origin):
+    """Add a commit to the 'Altium 365' repository, after the others."""
+
+    def add(message: str, author: str, tx: str, rx: str) -> None:
+        when = parse_when("yesterday") + timedelta(hours=31)
+        _commit(daq_origin, _design(tx, rx, extra=True), message, author, when)
+
+    return add
 
 
 @pytest.fixture

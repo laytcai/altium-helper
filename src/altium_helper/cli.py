@@ -38,6 +38,11 @@ def _print(data: dict | list, as_json: bool, text: str) -> None:
     print(json.dumps(data, indent=2) if as_json else text)
 
 
+def _subject(message: str) -> str:
+    """A commit's first line. Altium doesn't ask for a message, so many are empty."""
+    return message.strip().splitlines()[0] if message.strip() else "(no message)"
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     version = netlist.install(force=args.force)
     print(f"universal-netlist {version} is installed in {netlist.install_dir()}")
@@ -278,7 +283,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         result = board.sync(force=True)
         head = result["latest_revision"]
         print(
-            f"{board.name}: {'updated' if result['updated'] else 'up to date'}, latest {head['rev']} {head['date'][:16]} {head['author']}: {head['message']}"
+            f"{board.name}: {'updated' if result['updated'] else 'up to date'}, latest {head['rev']} {head['date'][:16]} {head['author']}: {_subject(head['message'])}"
         )
     return 0
 
@@ -299,7 +304,7 @@ def cmd_history(args: argparse.Namespace) -> int:
             else ""
         )
         lines.append(
-            f"{commit['rev']} {commit['date'][:16]} {commit['author']}: {commit['message'].splitlines()[0]}{design}"
+            f"{commit['rev']} {commit['date'][:16]} {commit['author']}: {_subject(commit['message'])}{design}"
         )
     _print(result, args.json, "\n".join(lines) or "No commits in that range.")
     return 0
@@ -317,7 +322,7 @@ def cmd_changes(args: argparse.Namespace) -> int:
     lines = [f"{result['board']}: {result['commit_count']} commits"]
     for commit in result["commits"]:
         lines.append(
-            f"\n{commit['rev']} {commit['date'][:16]} {commit['author']}: {commit['message'].splitlines()[0]}"
+            f"\n{commit['rev']} {commit['date'][:16]} {commit['author']}: {_subject(commit['message'])}"
         )
         lines += [f"  {line}" for line in commit["changes"]]
     lines.append("\nOverall:")

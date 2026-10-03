@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from altium_helper import boards, config, git
+from altium_helper import boards, cli, config, git
 from altium_helper.boards import BoardError
 from altium_helper.history import board_changes, board_history
 from altium_helper.timeparse import parse_when
@@ -62,6 +62,17 @@ def test_changes_since_yesterday_find_the_swap(board):
     assert terminator["changes"] == ["Part added: R9 (120)"]
     assert result["overall"][0].startswith("Swapped: U3.12 (PB12) and U3.13 (PB13)")
     assert "Part added: R9 (120)" in result["overall"]
+
+
+def test_commits_without_a_message(board, add_commit, capsys):
+    """Altium doesn't ask for a message when someone saves a project to the server."""
+    add_commit("", "Carol", tx="CAN_RX", rx="CAN_TX")
+    assert board.sync()["latest_revision"]["message"] == ""
+    assert board_history(board)["commits"][0]["message"] == ""
+    assert board_changes(board)["commits"][0]["changes"][0].startswith("Swapped:")
+    assert cli.main(["history", "daq"]) == 0
+    assert cli.main(["changes", "daq"]) == 0
+    assert "Carol: (no message)" in capsys.readouterr().out
 
 
 def test_revisions_are_cached(board):

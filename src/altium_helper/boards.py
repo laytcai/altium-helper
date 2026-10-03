@@ -230,9 +230,11 @@ class Board:
     # ---------------------------------------------------------------- history
 
     def commit_info(self, rev: str) -> dict:
+        # Not .strip(): Python counts \x1f as whitespace, so a commit with no message
+        # (Altium doesn't ask for one) would lose its last field.
         fields = self._git(
             ["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s", rev]
-        ).strip()
+        ).rstrip("\n")
         full, author, date, message = fields.split("\x1f", 3)
         return {
             "rev": full[:10],
