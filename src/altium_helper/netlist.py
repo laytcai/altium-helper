@@ -105,6 +105,7 @@ def install(force: bool = False) -> str:
             "--no-fund",
         ],
         cwd=target,
+        stdin=subprocess.DEVNULL,  # not the MCP server's JSON-RPC pipe
         capture_output=True,
         text=True,
     )
@@ -135,6 +136,7 @@ def export_json(design: str | Path, out: str | Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [str(node_executable()), str(script()), "export-json", str(design), str(out)],
+        stdin=subprocess.DEVNULL,  # not the MCP server's JSON-RPC pipe
         capture_output=True,
         text=True,
         env=_environment(),

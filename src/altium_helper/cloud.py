@@ -124,9 +124,8 @@ def discover_boards() -> list[dict]:
         if not page["pageInfo"]["hasNextPage"]:
             break
         after = page["pageInfo"]["endCursor"]
-    path = _boards_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+    # In one step: other tool calls read the file while this writes it.
+    config.write_file(_boards_file(), json.dumps(entries, indent=2) + "\n")
     return entries
 
 

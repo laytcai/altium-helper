@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -31,6 +33,20 @@ else:
 # Files whose change can change the design's connectivity.
 DESIGN_SUFFIXES = (".prjpcb", ".schdoc", ".pcbdoc", ".harness", ".netlist.json")
 LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
+# Written into .git as the last step of a clone. A copy without it was interrupted.
+COMPLETE_MARKER = "altium-helper-complete"
+# Written into .git once a clone's download finished. The set-up after it can still fail
+# (a repository with no single .PrjPcb, a path Windows can't check out); the next sync
+# then redoes the set-up instead of downloading again.
+DOWNLOADED_MARKER = "altium-helper-downloaded"
+# Repack a copy once it has this many packs (each fetch adds one); git's own limit.
+MAX_PACKS = 50
+# A git lock file older than this was left by a git that died. On POSIX, network git
+# commands hold the board lock until they exit (see _exclusive), so any lock file found
+# while holding it is stale once a short local command could have finished. Windows
+# can't pass the board lock to git, so there an orphaned fetch may still be running:
+# wait out git's own 10-minute stall limit (git.NETWORK_SETTINGS).
+STALE_GIT_LOCK_SECONDS = 900 if sys.platform == "win32" else 60
 
 
 class BoardError(RuntimeError):
@@ -50,11 +66,13 @@ def _now() -> datetime:
 
 
 @contextlib.contextmanager
-def _exclusive(path: Path) -> Iterator[None]:
+def _exclusive(path: Path) -> Iterator[tuple[int, ...]]:
     """Hold an exclusive lock on ``path`` against other threads and processes.
 
-    The operating system drops the lock if the process dies, so a crash can't leave
-    a board locked.
+    The operating system drops the lock once no process holds it open, so a crash can't
+    leave a board locked. Yields the descriptors to pass to git (``git.run(keep_fds=)``):
+    on POSIX a git that outlives this process then keeps the board locked until it exits,
+    so the next call can't delete a copy git is still writing.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+b") as handle:
@@ -67,16 +85,36 @@ def _exclusive(path: Path) -> Iterator[None]:
                 except OSError:
                     time.sleep(0.1)
             try:
-                yield
+                yield ()
             finally:
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
-                yield
+                yield (handle.fileno(),)
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _remove_tree(path: Path) -> None:
+    """Delete a folder git wrote. Git's object files are read-only, which Windows won't delete."""
+
+    def make_writable_and_retry(function, failed, error):
+        if sys.platform != "win32" or function not in (os.unlink, os.rmdir):
+            raise error[1] if isinstance(error, tuple) else error  # 3.10/3.11: exc_info
+        os.chmod(failed, stat.S_IWRITE)  # clears Windows' read-only attribute
+        function(failed)
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=make_writable_and_retry)
+        else:
+            shutil.rmtree(path, onerror=make_writable_and_retry)
+    except OSError as e:
+        raise BoardError(
+            f"Couldn't remove the old copy at {path} ({e}). Delete that folder, then try again."
+        ) from e
 
 
 def _credentials_for(url: str) -> git.Credentials | None:
@@ -138,12 +176,15 @@ class Board:
         self.root.mkdir(parents=True, exist_ok=True)
         self.meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
-    def _git(self, args: list[str], cwd: Path | None = None) -> str:
+    def _git(
+        self, args: list[str], cwd: Path | None = None, keep_fds: tuple[int, ...] = ()
+    ) -> str:
         return git.run(
             args,
             cwd or self.repo,
             url=self.git_url,
             credentials=_credentials_for(self.git_url),
+            keep_fds=keep_fds,
         )
 
     @property
@@ -158,7 +199,7 @@ class Board:
 
     # ------------------------------------------------------------------- sync
 
-    def _lock(self) -> contextlib.AbstractContextManager[None]:
+    def _lock(self) -> contextlib.AbstractContextManager[tuple[int, ...]]:
         """One clone, fetch or analysis of this board at a time, in any process.
 
         Claude often calls two tools at once, and both may be first to fetch a board.
@@ -166,13 +207,31 @@ class Board:
         return _exclusive(self.root / ".lock")
 
     def cloned(self) -> bool:
-        return (self.repo / ".git").exists()
+        """True once a clone of this board's repository has finished, read-only guards included.
+
+        A clone that was interrupted (git killed, or the server stopped while git ran on)
+        has no marker, and the next sync clones again.
+        """
+        git_dir = self.repo / ".git"
+        # Keys follow the API's listing order, so a key can come to name another project.
+        if self.meta().get("git_url", self.git_url) != self.git_url:
+            return False
+        if (git_dir / COMPLETE_MARKER).exists():
+            return True
+        # Copies made before these markers: the checkout was their last step, and git
+        # writes the index only then.
+        return (git_dir / "index").exists() and not (
+            git_dir / DOWNLOADED_MARKER
+        ).exists()
 
     def ensure_allowed(self) -> None:
         """Refuse boards on the exclude list, whatever route would fetch them."""
         settings = config.Settings.load()
+        # A project id never changes; a name can be shared, and a key can move.
         if any(
-            self.key == slug(x) or self.name.lower() == x.lower()
+            self.key == slug(x)
+            or self.name.lower() == x.lower()
+            or (self.project_id and x == self.project_id)
             for x in settings.exclude
         ):
             raise BoardError(
@@ -185,22 +244,25 @@ class Board:
         if not self.git_url:
             raise BoardError(f"Altium 365 has no git repository for {self.name}")
         settings = config.Settings.load()
-        updated = False
-        with self._lock():
-            if not self.project_file:  # another call may have cloned it meanwhile
-                self.project_file = self.meta().get("project_file", "")
+        updated = fetched = False
+        with self._lock() as held:
             if not self.cloned():
-                self._clone()
-                updated = True
+                self._clone(held)
+                updated = fetched = True
             else:
+                if not self.project_file:  # another call may have cloned it meanwhile
+                    self.project_file = self.meta().get("project_file", "")
                 last = self.meta().get("last_sync")
                 fresh = last and _now() - datetime.fromisoformat(last) < timedelta(
                     minutes=settings.sync_interval_minutes
                 )
                 if force or not fresh:
-                    updated = self._update()
+                    updated, fetched = self._update(held), True
             head = self.commit_info("HEAD")
-            self._save_meta(last_sync=_now().isoformat(), head=head["rev"])
+            # Freshness counts from the last real fetch, so a board in constant use
+            # still fetches every sync interval.
+            stamp = {"last_sync": _now().isoformat()} if fetched else {}
+            self._save_meta(head=head["rev"], **stamp)
         return {
             "board": self.name,
             "updated": updated,
@@ -208,25 +270,49 @@ class Board:
             "project": str(self.repo / self.project_file),
         }
 
-    def _clone(self) -> None:
-        if self.repo.exists():
-            shutil.rmtree(
-                self.repo
-            )  # a clone that failed half-way; nothing of the user's lives here
-        self.root.mkdir(parents=True, exist_ok=True)
-        git.run(
-            [
-                "clone",
-                "--quiet",
-                "--filter=blob:none",
-                "--no-checkout",
-                self.git_url,
-                str(self.repo),
-            ],
-            url=self.git_url,
-            credentials=_credentials_for(self.git_url),
-        )
-        git.make_read_only(self.repo)
+    def _downloaded(self) -> bool:
+        """Did a clone of this board's repository finish downloading, whatever came after?"""
+        if not (self.repo / ".git" / DOWNLOADED_MARKER).exists():
+            return False
+        # An empty repository clones without a branch, and a fetch never adds one.
+        if not self.resolve("refs/remotes/origin/HEAD"):
+            return False
+        try:
+            # The stored URL: `remote get-url` applies the user's insteadOf rewrites.
+            url = self._git(["config", "--get", "remote.origin.url"]).strip()
+        except git.GitError:
+            return False
+        return url == self.git_url
+
+    def _clone(self, held: tuple[int, ...] = ()) -> None:
+        if self._downloaded():
+            # Only the set-up failed last time: fetch what's new, then set up again.
+            self._clear_stale_git_locks()
+            self._git(["fetch", "--quiet", "--prune", "origin"], keep_fds=held)
+        else:
+            if self.repo.exists():
+                # An interrupted clone, or another project's copy; nothing of the user's lives here.
+                _remove_tree(self.repo)
+            self.root.mkdir(parents=True, exist_ok=True)
+            if self.meta().get("git_url", self.git_url) != self.git_url:
+                self.meta_path.unlink()  # that project's branch and project file aren't ours
+            git.run(
+                [
+                    "clone",
+                    "--quiet",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    self.git_url,
+                    str(self.repo),
+                ],
+                url=self.git_url,
+                credentials=_credentials_for(self.git_url),
+                keep_fds=held,
+            )
+            git.make_read_only(self.repo)
+            (self.repo / ".git" / DOWNLOADED_MARKER).write_text(
+                _now().isoformat() + "\n", encoding="utf-8"
+            )
         head = self._git(
             ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
         ).strip()
@@ -236,18 +322,46 @@ class Board:
             self.project_file = self._find_project_file(f"origin/{branch}")
         self._save_meta(project_file=self.project_file)
         self._sparse(self.repo)
-        self._git(["checkout", "--quiet", branch])
+        # -B and --force: a failed earlier set-up may have left the branch behind, or
+        # files half checked out.
+        self._git(
+            ["checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}"],
+            keep_fds=held,
+        )
+        (self.repo / ".git" / COMPLETE_MARKER).write_text(
+            _now().isoformat() + "\n", encoding="utf-8"
+        )
 
-    def _update(self) -> bool:
+    def _update(self, held: tuple[int, ...] = ()) -> bool:
+        self._clear_stale_git_locks()
         if self._git(["status", "--porcelain", "--untracked-files=no"]).strip():
             raise BoardError(
                 f"{self.repo} has local changes. altium-helper never changes board files; "
                 "undo the changes there, then sync again."
             )
         before = self._git(["rev-parse", "HEAD"]).strip()
-        self._git(["fetch", "--quiet", "--prune", "origin"])
+        self._git(["fetch", "--quiet", "--prune", "origin"], keep_fds=held)
         self._git(["merge", "--quiet", "--ff-only", f"origin/{self.branch}"])
+        self._tidy()
         return self._git(["rev-parse", "HEAD"]).strip() != before
+
+    def _tidy(self) -> None:
+        """Repack once fetches have added many packs; git's background upkeep is off."""
+        packs = (self.repo / ".git" / "objects" / "pack").glob("*.pack")
+        if len(list(packs)) >= MAX_PACKS:
+            self._git(["repack", "-a", "-d", "-q"])
+
+    def _clear_stale_git_locks(self) -> None:
+        """Delete lock files left by a git that died; each one would stop every later sync.
+
+        Call only while holding the board lock, so no git of ours is using them.
+        """
+        git_dir = self.repo / ".git"
+        found = [*git_dir.glob("*.lock"), *git_dir.glob("refs/**/*.lock")]
+        for lock in found:
+            with contextlib.suppress(OSError):
+                if time.time() - lock.stat().st_mtime > STALE_GIT_LOCK_SECONDS:
+                    lock.unlink()
 
     def _find_project_file(self, rev: str) -> str:
         files = self._git(["ls-tree", "-r", "--name-only", rev]).splitlines()
@@ -456,10 +570,15 @@ def all_boards() -> dict[str, Board]:
             git_url=entry.git_url,
             project_file=entry.project_file,
         )
-    # Keep the project file found when the board was first cloned.
+    # Keep the project file found when the board was first cloned, if that copy is
+    # still this board's: keys follow the API's listing order and can move.
     for board in boards.values():
-        if not board.project_file:
-            board.project_file = board.meta().get("project_file", "")
+        meta = board.meta()
+        if (
+            not board.project_file
+            and meta.get("git_url", board.git_url) == board.git_url
+        ):
+            board.project_file = meta.get("project_file", "")
     return boards
 
 
