@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from . import diff
@@ -9,6 +11,11 @@ from .boards import Board, BoardError, is_design_file
 
 # Commits beyond this many are covered only by the overall change, not one by one.
 MAX_COMMITS = 25
+# The files universal-netlist reads. A commit that changes none of them (only the
+# .PcbDoc, say) leaves the netlist as it was.
+NETLIST_SUFFIXES = (".prjpcb", ".schdoc", ".harness", ".netlist.json")
+# Revisions analyzed at once; each runs universal-netlist in its own Node process.
+ANALYSES_AT_ONCE = max(1, min(8, (os.cpu_count() or 2) // 2))
 
 
 def board_history(
@@ -39,6 +46,17 @@ def board_history(
 
 def _parent(board: Board, rev: str) -> str | None:
     return board.parent(rev)
+
+
+def _changes_netlist(commit: dict) -> bool:
+    return any(f["path"].lower().endswith(NETLIST_SUFFIXES) for f in commit["files"])
+
+
+def _analyze_all(board: Board, revs: set[str]) -> dict[str, dict]:
+    """Analyze revisions in parallel: on a big board each takes about a second."""
+    ordered = sorted(revs)
+    with ThreadPoolExecutor(max(1, min(len(ordered), ANALYSES_AT_ONCE))) as pool:
+        return dict(zip(ordered, pool.map(board.analyze, ordered)))
 
 
 def board_changes(
@@ -84,27 +102,35 @@ def board_changes(
         result["overall"] = ["No commits in this range."]
         return result
 
-    for commit in commits[-MAX_COMMITS:]:
+    shown = commits[-MAX_COMMITS:]
+    # Analyze only the revisions whose netlist can differ: the commits that change
+    # universal-netlist's inputs, the state before the first one shown, and the ends.
+    state = _parent(board, shown[0]["full_rev"])  # its netlist is the current one
+    needed = {state, start, end} | {c["full_rev"] for c in shown if _changes_netlist(c)}
+    analyses = _analyze_all(board, {rev for rev in needed if rev})
+    for commit in shown:
         entry = {k: commit[k] for k in ("rev", "date", "author", "message")}
         entry["files"] = [f"{f['status']} {f['path']}" for f in commit["files"]]
-        if any(is_design_file(f["path"]) for f in commit["files"]):
-            parent = _parent(board, commit["full_rev"])
-            before = board.analyze(parent)["netlist"] if parent else None
-            after = board.analyze(commit["full_rev"])["netlist"]
+        if not any(is_design_file(f["path"]) for f in commit["files"]):
+            entry["changes"] = ["No design files changed"]
+        elif not _changes_netlist(commit):
+            entry["changes"] = ["No connectivity change"]
+        else:
+            before = analyses[state]["netlist"] if state else None
+            after = analyses[commit["full_rev"]]["netlist"]
             changes = diff.diff_netlists(before or {}, after or {})
             entry["changes"] = diff.summarize(changes, after) or [
                 "No connectivity change"
             ]
-        else:
-            entry["changes"] = ["No design files changed"]
+            state = commit["full_rev"]
         result["commits"].append(entry)
     if len(commits) > MAX_COMMITS:
         result["note"] = (
             f"Only the last {MAX_COMMITS} of {len(commits)} commits are broken down."
         )
 
-    before = board.analyze(start)["netlist"] if start else None
-    last = board.analyze(end)
+    before = analyses[start]["netlist"] if start else None
+    last = analyses[end]
     overall = diff.diff_netlists(before or {}, last["netlist"] or {})
     result["overall"] = diff.summarize(overall, last["netlist"]) or [
         "No connectivity change"
