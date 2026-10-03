@@ -12,8 +12,9 @@ pins moved or swapped, and whether the PCB was updated to match.
 
 ## What it can do
 
-- **Fetch boards itself.** Git copies of each Altium 365 project, with the full history, updated whenever Claude
-  asks about a board. Nobody downloads files by hand.
+- **Fetch boards itself.** Git copies of each Altium 365 project, updated whenever Claude asks about a board. A
+  first copy holds the latest revision; older history downloads when a question needs it. Nobody downloads files
+  by hand.
 - **Answer "what changed" questions.** For any time range or pair of revisions it reports:
   - each commit's author, time and message;
   - pins that moved to another net;
@@ -58,8 +59,9 @@ Not included yet:
 An MCP server is a small program Claude Code starts in the background and calls as tools. There are three pieces:
 
 - **altium-helper**, the Python package in this repo, and a command.
-  - It signs in, lists the workspace's boards, and keeps a git copy of each board. The copies are blobless: the
-    history arrives in seconds, and file contents download only when needed.
+  - It signs in, lists the workspace's boards, and keeps a git copy of each board. A board's first copy holds just
+    its latest revision, about 10-20 seconds to fetch. Older history downloads when a question needs it, only as
+    far back as it needs.
   - It reads any past revision into a temporary folder holding just the project, works out its netlist with
     universal-netlist, and compares revisions.
   - Claude calls it through six read-only tools: `list_boards`, `get_board`, `board_history`, `board_changes`,
@@ -100,7 +102,7 @@ comments. Git is the only way to get the files and past revisions: Altium's APIs
 |---|---|---|
 | [universal-netlist](https://github.com/IntelligentElectron/universal-netlist) | Reading Altium projects; connectivity queries | 1.12.0, pinned by a committed npm lockfile. Apache-2.0 |
 | [nodejs-wheel-binaries](https://github.com/njzjz/nodejs-wheel) | The Node.js that runs universal-netlist, installed by uv like any Python package, so nobody installs Node | Node 24. MIT |
-| Git | Board copies and history (blobless clones, sparse worktrees) | 2.36 or newer |
+| Git | Board copies and history (shallow clones, sparse worktrees) | 2.36 or newer |
 | [Nexar API](https://nexar.com) and the Altium 365 API | Sign-in, board list, git URLs, comments, PCB fallback (queries only) | — |
 | [MCP Python SDK](https://pypi.org/project/mcp/) | altium-helper's MCP server | 2.x. MIT |
 | [olefile](https://github.com/decalage2/olefile) | Reading `.PcbDoc` files for the schematic-vs-PCB check | 0.47. BSD-2-Clause |
@@ -202,6 +204,8 @@ them in a different order.
 ```bash
 git pull && altium-helper setup
 ```
+Then restart every open Claude Code session, or reconnect altium-helper with `/mcp`: a running server keeps the code
+it started with.
 
 ## Git plan and conventions
 
@@ -228,8 +232,15 @@ git pull && altium-helper setup
 
 ### Board repositories in Altium 365
 - **One repository per project.** Each Altium 365 project is a git repository, and the API supplies its URL.
-- **Cloning.** A board is cloned the first time Claude asks about it, without file contents. Later requests
-  fetch only new commits, at most every 5 minutes.
+- **Cloning.** A board is cloned the first time a tool needs its files, latest revision only (`--depth=1`).
+  Altium's git server has no partial clone, and most of a board's history is old versions of its `.PcbDoc`, so a
+  full clone took 43-62 s (up to 5 minutes on a slow day) where the latest revision takes 7-20 s.
+  - History tools fetch older commits when they need them, only as far back as they need (`--deepen`,
+    `--shallow-since`), and never shorten what's already there. The server won't send a commit by its id, so an
+    old revision named only by its id is fetched in growing steps, at worst with the whole history
+    (`--unshallow`).
+  - Later requests fetch only new commits, at most every 5 minutes.
+  - A copy whose first clone was interrupted is cloned again.
 - **Past revisions** are read from a temporary worktree holding just the project's folder. The netlist and the PCB
   check of each revision are cached by commit.
 - **Read-only.** Clones get an invalid push URL and a `pre-push` hook that always fails. The tool runs only clone,

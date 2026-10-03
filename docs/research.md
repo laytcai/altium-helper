@@ -133,8 +133,8 @@ scope modes.
   - `desCommentThreads(projectId)` returns the threads with their comments.
   - The identity server (`identity.nexar.com`) supports the `offline_access` scope and the refresh-token and
     device-code grants.
-- **Git performance on the public UBC repo** (167 MB, many boards):
-  - A blobless clone takes 0.5 s and 300 KB.
+- **Git performance on the public UBC repo** (167 MB, many boards; GitHub, which has partial clone):
+  - A blobless clone takes 0.5 s and 300 KB. Altium 365's git server can't do this; see section 4.
   - Checking out one board folder at an old revision into a sparse worktree takes 0.75 s and about 5 MB.
   - Git 2.36 or newer is needed for `sparse-checkout --no-cone`.
 - **Real history.** The diff engine read UBC's "Reconfigured MCU pinout" commit as one pin swap, one 3-pin rotation
@@ -160,9 +160,42 @@ scope modes.
 - **Comment threads:** `DesCommentThread.status` is an `Int`; the schema says "0 = Resolved, 1 = Active".
 - **Parallel tool calls run at once.** MCP SDK 2.x handles requests concurrently and runs plain tools on worker
   threads. Two calls on a board nobody had fetched both cloned it, and one failed.
+- **The workspace has 706 projects**, all with a git URL, so fetching every board up front isn't practical.
+
+### Altium 365's git server
+Measured on REV12 PDU 2 (68 commits), BMS Master (269) and PCM (998), and a FlashCat adapter (6).
+- **What it is.** Git for Windows 2.45.1, behind an AWS load balancer, Envoy and ASP.NET MVC on IIS. It speaks
+  protocol v0 only, and advertises `shallow deepen-since deepen-not deepen-relative` but **no `filter`** and no
+  `allow-tip-sha1-in-want` or `allow-reachable-sha1-in-want`.
+- **No partial clone.** `clone --filter=blob:none` silently downloads every version of every file (`--quiet` hides
+  git's "filtering not recognized by server" warning): 46 / 103 / 131 MB for PDU / BMS / PCM. Old versions are
+  67-93% of that, mostly old `.PcbDoc` files.
+- **No fetch by commit id:** "Server does not allow request for unadvertised object". Older history comes by count
+  (`--deepen`) or date (`--shallow-since`).
+- **It builds each download from scratch.** Recent commits are stored unpacked (PDU had never been repacked), so
+  every request compresses them again, 3-13 times slower than a laptop does. Nothing is sent until the download is
+  ready, then it arrives at 31-42 MB/s: a full clone was 40-56 s of silence and 1-4 s of transfer. Our own
+  bandwidth (34 MB/s) isn't the limit.
+- **Timings** (one at a time; the first runs, in the morning, were 2-5 times slower):
+
+  | | PDU 2 | BMS Master | PCM |
+  |---|---|---|---|
+  | Full clone | 43-54 s, 46 MB | 48-55 s, 103 MB | 57-62 s, 131 MB |
+  | Latest revision only (`--depth=1`) | 9.5-13 s, 15 MB | 9-20 s, 17 MB | 7-13 s, 9 MB |
+  | `--deepen=1` | 5.2 s | 3.3 s | 3.9 s |
+  | A busy day (`--deepen` by 12 to 17 commits) | 22.0 s | 18.8 s | 13.6 s |
+  | The rest of the history (`--unshallow`) | 39-41 s | 47-50 s | 52 s |
+
+- **Later fetches send only what's new**, as deltas against what the copy holds. A `.PcbDoc` change arrives as
+  130-225 KB instead of a 4-5 MB copy. A fetch with nothing new takes 0.42 s; one new commit 2.7-5.7 s; 20 new
+  commits 22 s. Each request costs about 2-4 s plus 0.15-0.25 s per object the server compresses.
+- **Nexar's revision list is git's history:** the same ids, order, authors, dates, messages and changed files on
+  all 1,341 commits of these four boards, in 1-3 s per board.
 
 ## 5. Open questions
 1. Will Altium register altium-helper as a public desktop client (route A)?
 2. Does our workspace have Admin → Developer (route C)? Members without an Altium password would need it.
 3. Does any of our repositories use Git LFS? If so, clones need `git-lfs`. The first board read didn't.
 4. Which board and revision had the CAN-SPI MOSI/MISO swap?
+5. Would Altium repack our repositories, or enable `uploadpack.allowFilter`? Either would make first fetches much
+   faster.

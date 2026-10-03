@@ -19,6 +19,10 @@ def board_history(
 ) -> dict:
     """Commits newest first, with the design files each one changed."""
     board.sync()
+    if since:
+        board.ensure_since(since)
+    else:
+        board.ensure_commits(limit, before=until)
     commits = board.log(since=since, until=until, limit=limit)
     for commit in commits:
         commit["design_files_changed"] = [
@@ -34,7 +38,7 @@ def board_history(
 
 
 def _parent(board: Board, rev: str) -> str | None:
-    return board.resolve(f"{rev}^") or None
+    return board.parent(rev)
 
 
 def board_changes(
@@ -51,15 +55,15 @@ def board_changes(
     """
     board.sync()
     if to_rev:
-        end = board.resolve(to_rev)
+        end = board.find_commit(to_rev)
     elif until:
-        end = board.last_commit_before(until)
+        end = board.last_commit_before(until, exact=True)
     else:
         end = board.resolve("HEAD")
     if not end:
         raise BoardError(f"{board.name} has no revisions in that range")
     if from_rev:
-        start = board.resolve(from_rev)
+        start = board.find_commit(from_rev)
         if not start:
             raise BoardError(f"{board.name}: no revision {from_rev!r}")
     elif since:

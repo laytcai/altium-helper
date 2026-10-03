@@ -137,14 +137,20 @@ def add_commit(daq_origin):
     return add
 
 
-@pytest.fixture
-def board(daq_origin, tmp_path, monkeypatch, universal_netlist):
-    """The synthetic DAQ board, registered in a temporary config."""
+@pytest.fixture(params=["full", "shallow"])
+def board(request, daq_origin, tmp_path, monkeypatch, universal_netlist):
+    """The synthetic DAQ board, registered in a temporary config.
+
+    Every test runs on both kinds of copy. Git clones a plain path in full whatever
+    --depth says, like the copies made before clones became shallow. A file:// URL
+    honours --depth, as Altium 365 does.
+    """
     monkeypatch.setenv("ALTIUM_HELPER_DESIGNS", str(tmp_path / "designs"))
     monkeypatch.setenv("ALTIUM_HELPER_CONFIG", str(tmp_path / "config"))
+    url = daq_origin.as_uri() if request.param == "shallow" else str(daq_origin)
     settings = config.Settings.load()
     settings.boards["daq"] = config.BoardConfig(
-        git_url=str(daq_origin), project_file=DESIGN, name="DAQ"
+        git_url=url, project_file=DESIGN, name="DAQ"
     )
     settings.save()
     return boards.find("daq")
