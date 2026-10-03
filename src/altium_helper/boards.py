@@ -12,7 +12,9 @@ import contextlib
 import json
 import re
 import shutil
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -20,6 +22,11 @@ from typing import Iterator
 from urllib.parse import urlsplit
 
 from . import checks, config, git, netlist
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 # Files whose change can change the design's connectivity.
 DESIGN_SUFFIXES = (".prjpcb", ".schdoc", ".pcbdoc", ".harness", ".netlist.json")
@@ -40,6 +47,36 @@ def is_design_file(path: str) -> bool:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@contextlib.contextmanager
+def _exclusive(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``path`` against other threads and processes.
+
+    The operating system drops the lock if the process dies, so a crash can't leave
+    a board locked.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b") as handle:
+        if sys.platform == "win32":
+            handle.seek(0)  # msvcrt locks bytes from the current position
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _credentials_for(url: str) -> git.Credentials | None:
@@ -121,6 +158,13 @@ class Board:
 
     # ------------------------------------------------------------------- sync
 
+    def _lock(self) -> contextlib.AbstractContextManager[None]:
+        """One clone, fetch or analysis of this board at a time, in any process.
+
+        Claude often calls two tools at once, and both may be first to fetch a board.
+        """
+        return _exclusive(self.root / ".lock")
+
     def cloned(self) -> bool:
         return (self.repo / ".git").exists()
 
@@ -142,18 +186,21 @@ class Board:
             raise BoardError(f"Altium 365 has no git repository for {self.name}")
         settings = config.Settings.load()
         updated = False
-        if not self.cloned():
-            self._clone()
-            updated = True
-        else:
-            last = self.meta().get("last_sync")
-            fresh = last and _now() - datetime.fromisoformat(last) < timedelta(
-                minutes=settings.sync_interval_minutes
-            )
-            if force or not fresh:
-                updated = self._update()
-        head = self.commit_info("HEAD")
-        self._save_meta(last_sync=_now().isoformat(), head=head["rev"])
+        with self._lock():
+            if not self.project_file:  # another call may have cloned it meanwhile
+                self.project_file = self.meta().get("project_file", "")
+            if not self.cloned():
+                self._clone()
+                updated = True
+            else:
+                last = self.meta().get("last_sync")
+                fresh = last and _now() - datetime.fromisoformat(last) < timedelta(
+                    minutes=settings.sync_interval_minutes
+                )
+                if force or not fresh:
+                    updated = self._update()
+            head = self.commit_info("HEAD")
+            self._save_meta(last_sync=_now().isoformat(), head=head["rev"])
         return {
             "board": self.name,
             "updated": updated,
@@ -343,38 +390,41 @@ class Board:
         full = self.resolve(rev)
         if not full:
             raise BoardError(f"{self.name}: no revision {rev!r}")
-        self.revisions_dir.mkdir(parents=True, exist_ok=True)
-        netlist_path = self.revisions_dir / f"{full}.netlist.json"
-        check_path = self.revisions_dir / f"{full}.check.json"
-        if not netlist_path.exists() or not check_path.exists():
-            with self.worktree(full) as tree:
-                design = tree / self.project_file
-                if not design.exists():
-                    return {
-                        "rev": full[:10],
-                        "netlist_path": None,
-                        "netlist": None,
-                        "check": None,
-                    }
-                _refuse_lfs_pointers(tree / self.project_folder)
-                netlist.export_json(design, netlist_path)
-                loaded = json.loads(netlist_path.read_text(encoding="utf-8"))
-                if design.suffix.lower() == ".prjpcb":
-                    report = checks.check_project(design, netlist=loaded)
-                else:  # a netlist file (e.g. from Nexar) has no documents or PCB to check
-                    report = {
-                        "project": design.name,
-                        "documents": 0,
-                        "missing_documents": [],
-                        "pcb": [],
-                    }
-                check_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        return {
-            "rev": full[:10],
-            "netlist_path": str(netlist_path),
-            "netlist": json.loads(netlist_path.read_text(encoding="utf-8")),
-            "check": json.loads(check_path.read_text(encoding="utf-8")),
-        }
+        with self._lock():  # a parallel call waits, then reads the cache
+            self.revisions_dir.mkdir(parents=True, exist_ok=True)
+            netlist_path = self.revisions_dir / f"{full}.netlist.json"
+            check_path = self.revisions_dir / f"{full}.check.json"
+            if not netlist_path.exists() or not check_path.exists():
+                with self.worktree(full) as tree:
+                    design = tree / self.project_file
+                    if not design.exists():
+                        return {
+                            "rev": full[:10],
+                            "netlist_path": None,
+                            "netlist": None,
+                            "check": None,
+                        }
+                    _refuse_lfs_pointers(tree / self.project_folder)
+                    netlist.export_json(design, netlist_path)
+                    loaded = json.loads(netlist_path.read_text(encoding="utf-8"))
+                    if design.suffix.lower() == ".prjpcb":
+                        report = checks.check_project(design, netlist=loaded)
+                    else:  # a netlist file (e.g. from Nexar) has no documents or PCB
+                        report = {
+                            "project": design.name,
+                            "documents": 0,
+                            "missing_documents": [],
+                            "pcb": [],
+                        }
+                    check_path.write_text(
+                        json.dumps(report, indent=2), encoding="utf-8"
+                    )
+            return {
+                "rev": full[:10],
+                "netlist_path": str(netlist_path),
+                "netlist": json.loads(netlist_path.read_text(encoding="utf-8")),
+                "check": json.loads(check_path.read_text(encoding="utf-8")),
+            }
 
 
 def _refuse_lfs_pointers(folder: Path) -> None:

@@ -5,6 +5,8 @@ so these tests need no Altium files.
 """
 
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -73,6 +75,39 @@ def test_commits_without_a_message(board, add_commit, capsys):
     assert cli.main(["history", "daq"]) == 0
     assert cli.main(["changes", "daq"]) == 0
     assert "Carol: (no message)" in capsys.readouterr().out
+
+
+def test_parallel_calls_on_a_board_nobody_fetched_yet(board, daq_origin, add_commit):
+    """Claude often calls two tools at once, and both may be first to fetch a board."""
+    # As the API lists boards: the first clone finds the project file.
+    (daq_origin / "board" / "DAQ.PrjPcb").write_text("[Design]\n", encoding="utf-8")
+    add_commit("Add the project file", "Bob", tx="CAN_TX", rx="CAN_RX")
+    settings = config.Settings.load()
+    settings.boards["daq"].project_file = ""
+    settings.save()
+    start = threading.Barrier(2)
+
+    def call(_) -> str:
+        found = boards.find("daq")
+        start.wait()  # both look the board up before either fetches it
+        return found.sync()["project"]
+
+    with ThreadPoolExecutor(2) as pool:
+        projects = list(pool.map(call, range(2)))
+    assert projects == [str(board.repo / "board" / "DAQ.PrjPcb")] * 2
+
+
+def test_parallel_analyses_of_one_revision(board):
+    board.sync()
+    start = threading.Barrier(2)
+
+    def call(_) -> dict:
+        start.wait()
+        return board.analyze("HEAD")["netlist"]
+
+    with ThreadPoolExecutor(2) as pool:
+        first, second = pool.map(call, range(2))
+    assert first == second and "U3" in first["components"]
 
 
 def test_revisions_are_cached(board):
