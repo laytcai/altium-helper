@@ -70,6 +70,7 @@ query ($ids: [ID!]!) {
 }"""
 
 BOARD_LIST_MAX_AGE = 6 * 3600  # seconds before the board list is fetched again
+THREAD_RESOLVED = 0  # DesCommentThread.status: "0 = Resolved, 1 = Active"
 
 
 def endpoint_and_token() -> tuple[str, str]:
@@ -162,7 +163,7 @@ def comments(board: Board) -> list[dict]:
         result.append(
             {
                 "thread": thread["threadNumber"],
-                "open": thread["status"] == 0,
+                "open": thread["status"] != THREAD_RESOLVED,
                 "document": (thread.get("context") or {}).get("documentId"),
                 "comments": [
                     {

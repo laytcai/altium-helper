@@ -121,6 +121,37 @@ def test_discovery_pages_through_projects_and_dedupes_names(signed_in, monkeypat
     )
 
 
+def test_comment_threads_say_whether_they_are_still_open(signed_in, monkeypatch):
+    # Nexar's schema: "Comment thread status. 0 = Resolved, 1 = Active."
+    threads = [
+        {
+            "threadNumber": 2,
+            "status": 1,
+            "createdAt": "2026-09-30T10:00:00Z",
+            "context": {"documentId": "D1"},
+            "comments": [
+                {
+                    "text": "Is the fuse footprint right?",
+                    "createdAt": "2026-09-30T10:00:00Z",
+                    "createdBy": {"firstName": "Ada", "lastName": "Lovelace"},
+                }
+            ],
+        },
+        {
+            "threadNumber": 1,
+            "status": 0,
+            "createdAt": "2026-09-29T10:00:00Z",
+            "context": None,
+            "comments": [],
+        },
+    ]
+    fake_api(monkeypatch, lambda q, v: {"desCommentThreads": threads})
+    board = boards.Board(key="pdu", name="PDU", git_url="", project_id="P9")
+    result = cloud.comments(board)
+    assert [(t["thread"], t["open"]) for t in result] == [(1, False), (2, True)]
+    assert result[1]["comments"][0]["by"] == "Ada Lovelace"
+
+
 def test_pcb_snapshot_becomes_a_valid_netlist(signed_in, monkeypatch):
     def answer(query, variables):
         if "variants { name }" in query:
