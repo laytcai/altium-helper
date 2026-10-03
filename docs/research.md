@@ -16,8 +16,8 @@ introspecting the live API schema, reading the source code, or running the tool.
 - The platform tracks `master`. The git server rejects `.zip`/`.7z`/`.rar` files larger than 256 MB.
 - A public 2023 mirror job cloned `https://<email>:<password>@afs-vcs-eu1.365.altium.com/git/<GUID>.git`, i.e. with
   an account email and password
-  ([mirror.yml](https://github.com/atochukwu0/SISPS-PV-PCB/blob/master/.github/workflows/mirror.yml)). Whether that
-  still works is **unverified**.
+  ([mirror.yml](https://github.com/atochukwu0/SISPS-PV-PCB/blob/master/.github/workflows/mirror.yml)). It still
+  works: our workspace's git accepted an account email and password on 2026-10-03.
 
 ### Altium 365 API tokens
 - The API is in closed beta: "currently in Closed Beta, and available only to a few selected early-access customers"
@@ -61,7 +61,9 @@ introspecting the live API schema, reading the source code, or running the tool.
   - Access tokens last 24 hours.
   - New accounts get an "Evaluation App" with the Design scope.
 - **Licensing:** "Design Queries requires you to have an Altium Designer license and to be a member of a workspace"
-  ([FAQ](https://support.nexar.com/support/solutions/articles/101000497890-frequently-asked-questions)).
+  ([FAQ](https://support.nexar.com/support/solutions/articles/101000497890-frequently-asked-questions)). With both,
+  design queries are free and unlimited. The Evaluation App's lifetime limit of 1000 parts counts Supply queries
+  only (FAQ, read 2026-10-03).
 
 ### Manual download (not used: the tool must not need manual steps)
 - In Altium 365's History view, commit and release entries have **Download Sources**, which gives a zip of that
@@ -146,11 +148,21 @@ scope modes.
 - **Node without installing Node.** `nodejs-wheel-binaries` (MIT) ships Node 24 as a Python wheel for Linux (glibc
   2.28+ and musl), macOS and Windows. That makes Git and uv the only prerequisites.
 
-## 4. Open questions
-1. Which git sign-in does our workspace accept: email and password (route B), or only tokens?
-2. Will Altium register altium-helper as a public desktop client (route A)?
-3. Does our workspace have Admin → Developer (route C)?
-4. Does the user have an Altium Designer license assigned, which Nexar needs?
-5. Do Altium 365 repositories use Git LFS for large files? If so, clones need `git-lfs`.
-6. Which board and revision had the CAN-SPI MOSI/MISO swap?
-7. Does the Nexar Evaluation App allow the redirect `http://localhost:3000/login` and `offline_access`? `login` retries without `offline_access`.
+## 4. Our workspace (2026-10-03)
+- **Access.** `altium-helper login` worked with a newly created Nexar app (Design scope): the localhost redirect
+  and `offline_access` were accepted, and Nexar listed every project with a `repositoryUrl`. Git then accepted the
+  account's email and password (route B). Nexar answering design queries implies the account has an Altium
+  Designer license.
+- **Repositories** are on `https://afs-vcs-ue1.365.altium.com/git/<id>.git`. The first board read had its
+  `.PrjPcb` at the repository root, `master` as its branch, and no Git LFS.
+- **Commit messages are often empty**: Altium doesn't ask for one when a project is saved to the server, and none
+  of that board's commits had one. `str.strip()` treats git's `\x1f` separator as whitespace, which broke parsing.
+- **Comment threads:** `DesCommentThread.status` is an `Int`; the schema says "0 = Resolved, 1 = Active".
+- **Parallel tool calls run at once.** MCP SDK 2.x handles requests concurrently and runs plain tools on worker
+  threads. Two calls on a board nobody had fetched both cloned it, and one failed.
+
+## 5. Open questions
+1. Will Altium register altium-helper as a public desktop client (route A)?
+2. Does our workspace have Admin → Developer (route C)? Members without an Altium password would need it.
+3. Does any of our repositories use Git LFS? If so, clones need `git-lfs`. The first board read didn't.
+4. Which board and revision had the CAN-SPI MOSI/MISO swap?

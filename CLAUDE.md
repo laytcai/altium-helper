@@ -4,14 +4,13 @@ Lets Claude read Penn Electric Racing's Altium 365 board designs and their histo
 macOS, without Altium Designer. `README.md` covers what it does, how it works and how to install it.
 `docs/research.md` has the verified facts behind the design.
 
-## Status (2026-09-30)
-Built and tested on public boards and on synthetic history, and registered with Claude Code in WSL.
-
-Not yet tried against the team's own Altium 365 workspace:
-- `altium-helper login` (Nexar browser sign-in);
-- git with the user's Altium password (route B).
+## Status (2026-10-03)
+Built and tested on public boards and on synthetic history. On 2026-10-03 it ran against the team's own Altium 365
+workspace: `altium-helper login` (Nexar browser sign-in) and git with the user's Altium email and password (route B)
+both work, and all six tools read a real board.
 
 Possible next steps:
+- team rollout: each member needs their own account, license, Nexar app and git sign-in, and `exclude` is per user;
 - route A (Altium desktop sign-in, once Altium issues a client ID);
 - a standalone firmware pin checker, if the skill's recipe isn't enough.
 
@@ -89,11 +88,16 @@ repository fixture is there too.
   numeric order. Unknown component fields are dropped before the check.
 - **Nexar** has the latest design, releases, a commit list and comments, but no past revisions and no schematic
   nets. `desWorkspaces` is deprecated; use `desWorkspaceInfos`.
-- **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`).
+- **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`). It runs plain (non-async) tools
+  on worker threads, so parallel tool calls really run at once: anything touching a board's files goes through
+  `Board._lock`.
+- **Altium 365 commits often have no message**, because Altium doesn't ask for one. Python's `str.strip()` treats
+  the `\x1f` separator in our git formats as whitespace, so never strip before splitting on it.
+- **Nexar comment threads:** `status` 0 means resolved, 1 means active.
 - **Multi-channel `.PcbDoc`** stores logical designators. The board designator is `SOURCEDESIGNATOR`, then `_`,
   then the room name from `SOURCEHIERARCHICALPATH`.
 
-## Firmware monorepo (Penn-Electric-Racing, locally `/home/lycai/Penn-Electric-Racing`)
+## Firmware monorepo (Penn-Electric-Racing, e.g. `~/github/per/Penn-Electric-Racing`)
 - **STM32 pin definitions:** `embedded/boards/*/*Pins.hpp`, e.g. `const Pin framMosi = PC12;`. Known mismatch:
   `BMSPins.hpp` `canRx`/`canTx` ("Swapped compared to schematic").
 - **Ludwig (CM4):**

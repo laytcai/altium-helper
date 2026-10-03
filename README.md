@@ -7,9 +7,8 @@ Ask Claude "did my team change the flipped pins on the DAQ board yesterday?". Th
 revisions from Altium 365 by itself and compares them. Claude then answers with who changed what and when, which
 pins moved or swapped, and whether the PCB was updated to match.
 
-> **Status (2026-09-30):** built and tested; see [What's verified](#whats-verified). The one thing not yet tried is
-> signing in to *our* Altium 365 workspace. [Getting into Altium 365](#getting-into-altium-365) explains the
-> options, and `altium-helper login` tries them for you.
+> **Status (2026-10-03):** built and tested, including on our own Altium 365 workspace: `altium-helper login` and
+> git with an Altium email and password both work. See [What's verified](#whats-verified).
 
 ## What it can do
 
@@ -84,7 +83,7 @@ comments. Git is the only way to get the files and past revisions: Altium's APIs
 
 | Route | How | What it needs | Status |
 |---|---|---|---|
-| **B. Git with your Altium email and password** | `altium-helper login` offers it, and tests it at once | An Altium account with a password (not Google sign-in) | Worked for a public project in 2023; untested with ours |
+| **B. Git with your Altium email and password** | `altium-helper login` offers it, and tests it at once | An Altium account with a password (not Google sign-in) | Works with our workspace (2026-10-03) |
 | **C. An Altium 365 API token** | `altium-helper login --token` (used for git too) | A workspace admin creates it in Admin → Developer, if our workspace has that page | Documented by Altium |
 | **A. Altium's desktop sign-in** | Not built yet | Altium registers this tool as an app. There's no self-service ([altium-auth](https://github.com/AltiumDeveloper/altium-auth)) | The long-term route for the team |
 | **D. Nexar only** | What happens if no git route works | A Nexar app plus an Altium Designer license | Documented. PCB data and the commit list only |
@@ -159,8 +158,9 @@ Use `--no-register` to print the registration commands instead of running them.
 **The Nexar app, needed before `login`:**
 1. Sign in at [portal.nexar.com](https://portal.nexar.com) with your Altium 365 account. If it asks you to create
    an organization, do so.
-2. Open your app, or the "Evaluation App" new accounts get, which has the Design scope. Copy its client ID and
-   secret; `login` asks for them. You can also set `NEXAR_CLIENT_ID` and `NEXAR_CLIENT_SECRET`.
+2. Open the "Evaluation App" new accounts get, or create an app with the Design scope (Supply isn't needed). Copy
+   its client ID and secret; `login` asks for them. You can also set `NEXAR_CLIENT_ID` and `NEXAR_CLIENT_SECRET`.
+   Design queries are free for an account with an Altium Designer license in a workspace.
 3. The sign-in comes back to `http://localhost:3000/login`. If Nexar reports a redirect error, add that address to
    the app's allowed redirect URLs.
 
@@ -247,7 +247,8 @@ git pull && altium-helper setup
 
 ## Known limits
 
-- **Access to our workspace is untested.** Run `altium-helper login` to find out which route works.
+- **Git needs an Altium password** (route B). An account that signs in with Google has none, so it needs route C
+  or gets the PCB fallback.
 - **History only covers what's been saved to Altium 365.** Unsaved work in someone's Altium Designer is invisible.
 - **universal-netlist's trace tool** has quirks. The skill warns Claude about each one, and `check` compares
   against the PCB.
@@ -260,6 +261,18 @@ git pull && altium-helper setup
   workspace-library parts.
 
 ## What's verified
+
+On 2026-10-03, against our Altium 365 workspace (Ubuntu 24.04):
+
+- **Sign-in.** `altium-helper login` signed in through Nexar, found the workspace and listed every project with its
+  git URL.
+- **Git with an Altium email and password** (route B) cloned a board with its full history.
+- **All six tools** worked on that board through the MCP server, two calls at a time. Getting there found three
+  bugs, now fixed:
+  - commits with no message, which are common in Altium, stopped every sync;
+  - comment threads showed resolved as open;
+  - two calls on a board nobody had fetched yet collided.
+- **Automated tests.** 73 pass, including new ones for each of those bugs.
 
 On 2026-09-30, in WSL (Ubuntu 26.04):
 
