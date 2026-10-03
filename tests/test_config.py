@@ -1,4 +1,5 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -36,3 +37,10 @@ def test_credentials_are_private(config_folder):
 def test_folders_follow_environment_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("ALTIUM_HELPER_DATA", str(tmp_path / "data"))
     assert config.designs_dir() == tmp_path / "data" / "designs"
+
+
+def test_parallel_saves_of_the_credentials_dont_collide(config_folder):
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda n: config.save_credentials({"n": n}), range(40)))
+    assert config.load_credentials()["n"] in range(40)
+    assert not list(config.config_dir().glob("*.tmp"))

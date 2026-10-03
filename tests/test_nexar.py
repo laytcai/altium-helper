@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -100,3 +101,61 @@ def test_expired_token_is_renewed_with_the_refresh_token(config_folder, monkeypa
 def test_no_sign_in_says_how_to_sign_in(config_folder):
     with pytest.raises(ApiError, match="altium-helper login"):
         nexar.access_token()
+
+
+def test_parallel_calls_renew_an_expired_token_once(config_folder, monkeypatch):
+    """Claude calls tools in parallel; each must not spend the refresh token again."""
+    config.save_credentials(
+        {
+            "nexar": {
+                "client_id": "client",
+                "client_secret": "secret",
+                "access_token": "old",
+                "expires_at": time.time() - 1,
+                "refresh_token": "refresh",
+            }
+        }
+    )
+    forms = fake_token_endpoint(monkeypatch)
+    slow = nexar._post_token
+    monkeypatch.setattr(
+        nexar, "_post_token", lambda form: time.sleep(0.1) or slow(form)
+    )
+    with ThreadPoolExecutor(6) as pool:
+        tokens = list(pool.map(lambda _: nexar.access_token(), range(6)))
+    assert tokens == ["token-1"] * 6 and len(forms) == 1
+
+
+def test_parallel_calls_share_a_renewal_that_failed(config_folder, monkeypatch):
+    """When Nexar's sign-in endpoint stalls, waiting calls mustn't each try again."""
+    config.save_credentials(
+        {
+            "nexar": {
+                "client_id": "client",
+                "client_secret": "secret",
+                "access_token": "old",
+                "expires_at": time.time() - 1,
+                "refresh_token": "refresh",
+            }
+        }
+    )
+    attempts = []
+
+    def stall(form):
+        attempts.append(form)
+        time.sleep(0.3)
+        raise ApiError("Can't reach Nexar: timed out")
+
+    monkeypatch.setattr(nexar, "_post_token", stall)
+
+    def call(_):
+        try:
+            nexar.access_token()
+        except ApiError as e:
+            return str(e)
+
+    start = time.monotonic()
+    with ThreadPoolExecutor(4) as pool:
+        errors = list(pool.map(call, range(4)))
+    assert errors == ["Can't reach Nexar: timed out"] * 4
+    assert len(attempts) == 1 and time.monotonic() - start < 2

@@ -51,7 +51,8 @@ Not included yet:
        ▼                     ▼                             │
   Altium 365 project     Nexar, or the Altium 365          │
   repositories           API: board list, git URLs,        │
-  (every revision)       comments, PCB fallback            │
+  (every revision)       commit list, comments,            │
+                         PCB fallback                      │
        └──────────► data folder: designs/<board>/ ─────────┘
                     git copy + a cached netlist for each revision looked at
 ```
@@ -72,11 +73,12 @@ An MCP server is a small program Claude Code starts in the background and calls 
 - **The `altium-boards` skill** tells Claude how to use both servers together. It also covers the quirks listed
   under [Known limits](#known-limits) and the firmware pin-check recipe.
 
-If git can't reach a board, the tools fall back to what Altium's API offers:
-- `get_board` returns the current PCB: pads, nets and symbol pin names.
-- `board_history` returns Altium 365's own commit list.
+`board_history` reads Altium 365's own commit list (the same commits as git, with the files each one changed)
+whenever the local copy doesn't hold that history yet, so listing commits never waits for a download. The list
+also tells the other history tools how far back to fetch, in one request.
 
-The result says it's PCB-only.
+If git can't reach a board at all, `get_board` falls back to the current PCB from Altium's API: pads, nets and
+symbol pin names, with no schematic wiring. The result says it's PCB-only.
 
 ## Getting into Altium 365
 
@@ -103,7 +105,7 @@ comments. Git is the only way to get the files and past revisions: Altium's APIs
 | [universal-netlist](https://github.com/IntelligentElectron/universal-netlist) | Reading Altium projects; connectivity queries | 1.12.0, pinned by a committed npm lockfile. Apache-2.0 |
 | [nodejs-wheel-binaries](https://github.com/njzjz/nodejs-wheel) | The Node.js that runs universal-netlist, installed by uv like any Python package, so nobody installs Node | Node 24. MIT |
 | Git | Board copies and history (shallow clones, sparse worktrees) | 2.36 or newer |
-| [Nexar API](https://nexar.com) and the Altium 365 API | Sign-in, board list, git URLs, comments, PCB fallback (queries only) | — |
+| [Nexar API](https://nexar.com) and the Altium 365 API | Sign-in, board list, git URLs, commit list, comments, PCB fallback (queries only) | — |
 | [MCP Python SDK](https://pypi.org/project/mcp/) | altium-helper's MCP server | 2.x. MIT |
 | [olefile](https://github.com/decalage2/olefile) | Reading `.PcbDoc` files for the schematic-vs-PCB check | 0.47. BSD-2-Clause |
 | Python 3.10+ and [uv](https://docs.astral.sh/uv/) | Running and installing altium-helper. uv fetches Python if needed | — |
@@ -322,7 +324,7 @@ On 2026-09-30, in WSL (Ubuntu 26.04):
 |---|---|---|
 | A team tool first | A personal tool first, on Linux and Windows | Your decision |
 | Fetch with an admin token; manual zips as the fallback | Fully automatic. Routes B and C are built in, A comes later, and D is the fallback | No manual downloads |
-| Nexar as optional extras | Nexar for sign-in, board list, git URLs, comments and the PCB fallback | It works with a member's own login |
+| Nexar as optional extras | Nexar for sign-in, board list, git URLs, the commit list, comments and the PCB fallback | It works with a member's own login |
 | Node installed separately | Node comes from a Python package | Git and uv are the only prerequisites |
 | Board data inside the repo | In the user data folder | A clean repo, and one install serves every project |
 | A firmware pin-checker program | The skill's recipe | Keeps the tool small; a real session showed Claude follows it |

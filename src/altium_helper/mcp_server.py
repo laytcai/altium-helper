@@ -6,7 +6,9 @@ returns the design path to pass to its tools.
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import re
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -64,8 +66,120 @@ def _tool(func):
     return server.tool(annotations=READ_ONLY)(wrapper)
 
 
+# How much of Altium 365's commit list board_history reads before asking git instead.
+API_HISTORY_LIMIT = 10_000
+COMMIT_ID = re.compile(r"[0-9a-fA-F]{4,40}")
+
+
 def _when(text: str | None):
     return parse_when(text) if text else None
+
+
+def _history_from_api(
+    board: boards.Board,
+    since: str | None,
+    until: str | None,
+    limit: int,
+    note: str | None = None,
+) -> dict:
+    """The board's commits from Altium 365's own list, which matches its git history.
+
+    Raises api.ApiError if the list doesn't reach back to the window asked for, so git
+    answers instead; once git has failed (``note`` given), the note says so.
+    """
+    start, end = _when(since), _when(until)
+    asked = max(limit, 100)
+    while True:
+        listed = cloud.revisions(board, limit=asked)
+        commits = [
+            c
+            for c in listed
+            if (not start or parse_when(c["date"]) >= start)
+            and (not end or parse_when(c["date"]) <= end)
+        ][:limit]
+        complete = len(listed) < asked
+        reached = bool(start and listed and parse_when(listed[-1]["date"]) < start)
+        if complete or reached or len(commits) == limit:
+            break
+        if asked >= API_HISTORY_LIMIT:
+            if note is None:
+                raise api.ApiError(
+                    f"Altium 365's commit list for {board.name} doesn't reach that far back"
+                )
+            note += f" Only its newest {asked} commits were read."
+            break
+        asked *= 10
+    for commit in commits:
+        commit["design_files_changed"] = [
+            f["path"] for f in commit["files"] if boards.is_design_file(f["path"])
+        ]
+    result = {
+        "board": board.name,
+        "source": "Altium 365 API",
+        "since": start.isoformat() if start else None,
+        "until": end.isoformat() if end else None,
+        "commits": commits,
+    }
+    return {**result, "note": note} if note else result
+
+
+def _fetch_history_for(
+    board: boards.Board,
+    since=None,
+    until=None,
+    revisions: tuple[str | None, ...] = (),
+    with_parent: bool = False,
+) -> None:
+    """Fetch the history a call needs in one request, sized from Altium 365's commit list.
+
+    A copy that starts at its latest revision can only guess, by count or date, how far
+    back to fetch, and each request takes seconds on Altium's server. Each history
+    reader still checks for itself afterwards, and fetches more if this fell short.
+    ``with_parent``: the call also needs the commit before the one it names.
+    """
+    if not (board.project_id and board.cloned() and board.is_shallow()):
+        return
+    extra = 2 if with_parent else 1
+    targets = [t for t in revisions if t and not board.resolve(t)]
+    if not (since or until or targets):
+        return
+    # A commit from before the moment, to the second, as Board.ensure_since needs.
+    since_s = since.replace(microsecond=0) if since else None
+    until_s = until.replace(microsecond=0) if until else None
+    for limit in (100, 1000, API_HISTORY_LIMIT):
+        try:
+            listed = cloud.revision_times(board, limit=limit)
+        except api.ApiError:
+            return
+        complete = len(listed) < limit
+        depth, found = 0, set()
+        found_since, found_until, reached_until = not since, not until, not until
+        for index, (rev, when) in enumerate(listed):
+            if not found_since and when < since_s:
+                depth, found_since = max(depth, index + 1), True
+            if not found_until and when <= until:  # the range's end
+                depth, found_until = max(depth, index + extra), True
+            if not reached_until and when < until_s:
+                depth, reached_until = max(depth, index + 1), True
+            for target in targets:
+                if rev.startswith(target.lower()):
+                    depth = max(depth, index + extra)
+                    found.add(target)
+        covered = found_since and found_until and reached_until
+        if (covered and len(found) == len(targets)) or complete:
+            break
+    head = board.resolve("HEAD")
+    if complete and any(rev == head for rev, _ in listed):
+        # Altium's whole list, which holds this copy's latest commit: what isn't in it
+        # doesn't exist, and fetching all the history first, as git alone would have
+        # to, can't change the answer.
+        for target in targets:
+            if target not in found and COMMIT_ID.fullmatch(target):
+                raise boards.BoardError(f"{board.name}: no revision {target!r}")
+        if not found_until:
+            raise boards.BoardError(f"{board.name} has no revisions in that range")
+    if depth:
+        board.ensure_depth(depth)
 
 
 def _find(board: str) -> boards.Board:
@@ -141,6 +255,7 @@ def get_board(board: str, revision: str = "latest") -> dict:
             "design": synced["project"],
             "revision": synced["latest_revision"],
         }
+    _fetch_history_for(found, revisions=(revision,))
     analysis = found.analyze(revision)
     if analysis["netlist_path"] is None:
         raise boards.BoardError(f"{found.name} has no project at revision {revision}")
@@ -163,21 +278,21 @@ def board_history(
     since/until take "yesterday", "today", "last week", "3 days ago" or an ISO date.
     """
     found = _find(board)
+    found.ensure_allowed()  # the commit list counts as fetching the board
+    if found.project_id and not (found.cloned() and not found.is_shallow()):
+        # The copy doesn't hold the history (yet): Altium's list answers in about a
+        # second, where git would first download it.
+        with contextlib.suppress(api.ApiError):
+            return _history_from_api(found, since, until, limit)
     synced, reason = _sync_or_none(found)
     if synced is None:
-        start, end = _when(since), _when(until)
-        commits = [
-            c
-            for c in cloud.revisions(found, limit=max(limit, 100))
-            if (not start or parse_when(c["date"]) >= start)
-            and (not end or parse_when(c["date"]) < end)
-        ][:limit]
-        return {
-            "board": found.name,
-            "source": "Altium 365 API",
-            "note": f"From Altium 365's commit list; git couldn't fetch the files ({reason}).",
-            "commits": commits,
-        }
+        return _history_from_api(
+            found,
+            since,
+            until,
+            limit,
+            note=f"From Altium 365's commit list; git couldn't fetch the files ({reason}).",
+        )
     return history.board_history(
         found, since=_when(since), until=_when(until), limit=limit
     )
@@ -205,6 +320,14 @@ def board_changes(
             f"Pin-level history needs the design files, and git couldn't fetch them ({reason}). "
             "board_history still lists who changed which files and when."
         )
+    if since or until or from_revision or to_revision:
+        _fetch_history_for(  # only the ends board_changes uses: a revision wins
+            found,
+            since=None if from_revision else _when(since),
+            until=None if to_revision else _when(until),
+            revisions=(from_revision, to_revision),
+            with_parent=not (since or from_revision),
+        )
     result = history.board_changes(
         found,
         since=_when(since),
@@ -229,6 +352,8 @@ def check_board(board: str, revision: str = "latest") -> dict:
     """Check a board: are its design documents present, and does the schematic match the PCB?"""
     found = _find(board)
     found.sync()
+    if revision != "latest":
+        _fetch_history_for(found, revisions=(revision,))
     analysis = found.analyze("HEAD" if revision == "latest" else revision)
     if analysis["check"] is None:
         raise boards.BoardError(f"{found.name} has no project at revision {revision}")

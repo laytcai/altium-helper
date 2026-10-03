@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from altium_helper import boards, git
+from altium_helper import boards, cloud, git, mcp_server
 from altium_helper.history import board_changes, board_history
 from altium_helper.timeparse import parse_when
 
@@ -220,6 +220,61 @@ def test_an_old_revision_is_fetched_in_growing_steps(board, daq_origin, fetches)
     assert _history_fetches(fetches) == ["--deepen=16", "--deepen=32"]
 
 
+@pytest.fixture
+def listed(shallow, daq_origin, monkeypatch):
+    """Altium 365's commit list for the board, newest first, as git shows it."""
+    log = subprocess.run(
+        ["git", "-C", str(daq_origin), "log", "--format=%H %cI"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split("\n")
+    times = [(h, datetime.fromisoformat(t)) for h, t in (l.split() for l in log if l)]
+    shallow.project_id = "P1"
+    monkeypatch.setattr(mcp_server, "_find", lambda name: shallow)
+    monkeypatch.setattr(cloud, "revision_times", lambda board, limit: times[:limit])
+    return times
+
+
+def test_changes_since_a_date_take_one_fetch_sized_from_the_api(listed, fetches):
+    result = mcp_server.board_changes("daq", since="yesterday")
+    assert result["commits"][0]["changes"][0].startswith("Swapped:")
+    assert _history_fetches(fetches) == ["--deepen=2"]
+
+
+def test_an_old_revision_takes_one_fetch_sized_from_the_api(listed, fetches):
+    first = listed[-1][0]
+    result = mcp_server.get_board("daq", revision=first[:10])
+    assert result["revision"]["full_rev"] == first
+    assert _history_fetches(fetches) == ["--deepen=2"]
+
+
+def test_history_of_a_shallow_copy_comes_from_the_api(listed, fetches, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cloud, "revisions", lambda board, limit: calls.append(limit) or []
+    )
+    assert mcp_server.board_history("daq")["source"] == "Altium 365 API"
+    assert calls and _history_fetches(fetches) == []
+
+
+def test_a_revision_altium_doesnt_list_is_refused_without_fetching(listed, fetches):
+    """Altium's whole list shows it doesn't exist; git alone would fetch everything."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="no revision"):
+        mcp_server.get_board("daq", revision="deadbeef12")
+    assert _history_fetches(fetches) == []
+
+
+def test_a_range_before_the_first_commit_is_refused_without_fetching(listed, fetches):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="no revisions in that range"):
+        mcp_server.board_changes("daq", until="2020-01-01")
+    assert _history_fetches(fetches) == []
+
+
 def test_an_old_revision_fetches_everything_last(board, daq_origin, fetches):
     """Past 16 + 32 + 64 commits, git alone fetches the rest of the history."""
     if not board.git_url.startswith("file:"):
@@ -253,3 +308,42 @@ def test_until_far_back_fetches_by_date_not_everything(board, daq_origin, fetche
     result = board_history(board, until=_yesterday(10) + timedelta(minutes=1), limit=1)
     assert [c["message"] for c in result["commits"]] == ["Fix flipped CAN pins"]
     assert "--unshallow" not in _history_fetches(fetches)
+
+
+def test_until_takes_one_fetch_sized_from_the_api(listed, fetches):
+    until = _yesterday(10) + timedelta(minutes=1)
+    result = mcp_server.board_changes("daq", until=until.isoformat())
+    assert [c["message"] for c in result["commits"]] == ["Fix flipped CAN pins"]
+    assert _history_fetches(fetches) == ["--deepen=2"]
+
+
+def test_to_revision_takes_one_fetch_sized_from_the_api(listed, fetches):
+    fix = listed[1][0]
+    result = mcp_server.board_changes("daq", to_revision=fix[:10])
+    assert [c["message"] for c in result["commits"]] == ["Fix flipped CAN pins"]
+    assert _history_fetches(fetches) == ["--deepen=2"]
+
+
+def test_a_list_without_the_latest_commit_isnt_trusted(listed, fetches, monkeypatch):
+    """A short list may be cut off; only one holding this copy's latest commit is whole."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    monkeypatch.setattr(
+        cloud, "revision_times", lambda board, limit: listed[1:][:limit]
+    )
+    with pytest.raises(ToolError, match="no revision"):
+        mcp_server.get_board("daq", revision="deadbeef12")
+    assert _history_fetches(fetches)  # git looked, since the list couldn't be trusted
+
+
+def test_a_revision_isnt_in_a_list_of_over_a_thousand(listed, fetches, monkeypatch):
+    oldest = listed[-1][1]
+    older = [(f"{i:040x}", oldest - timedelta(hours=i + 1)) for i in range(1010)]
+    monkeypatch.setattr(
+        cloud, "revision_times", lambda board, limit: (listed + older)[:limit]
+    )
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="no revision"):
+        mcp_server.get_board("daq", revision="deadbeef12")
+    assert _history_fetches(fetches) == []

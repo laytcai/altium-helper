@@ -6,6 +6,7 @@ so every document is checked before it's sent: anything that isn't a plain query
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -61,6 +62,9 @@ def graphql(
         raise ApiError(f"HTTP {e.code} from {endpoint}: {detail}") from e
     except urllib.error.URLError as e:
         raise ApiError(f"Can't reach {endpoint}: {e.reason}") from e
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        # A timeout, a dropped connection or a reply that isn't JSON.
+        raise ApiError(f"No usable answer from {endpoint}: {e!r}") from e
     errors = payload.get("errors") or []
     if errors and not payload.get("data"):
         raise ApiError(

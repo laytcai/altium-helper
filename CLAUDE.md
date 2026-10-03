@@ -34,7 +34,9 @@ Possible next steps:
 ## Layout (`src/altium_helper/`)
 - **Interfaces:**
   - `cli`: the `altium-helper` command.
-  - `mcp_server`: the six read-only tools Claude calls. It falls back to the API when git fails.
+  - `mcp_server`: the six read-only tools Claude calls. `board_history` reads Altium 365's commit list while a
+    copy lacks the history, and the list sizes history fetches. `get_board` falls back to the API's PCB when git
+    fails.
   - `setup_cmd`: finds `claude` (on PATH or bundled in an editor extension) and registers the servers and the
     skill.
 - **Boards and history:**
