@@ -190,7 +190,8 @@ Measured on REV12 PDU 2 (68 commits), BMS Master (269) and PCM (998), and a Flas
   130-225 KB instead of a 4-5 MB copy. A fetch with nothing new takes 0.42 s; one new commit 2.7-5.7 s; 20 new
   commits 22 s. Each request costs about 2-4 s plus 0.15-0.25 s per object the server compresses.
 - **Nexar's revision list is git's history:** the same ids, order, authors, dates, messages and changed files on
-  all 1,341 commits of these four boards, in 1-3 s per board.
+  all 1,341 commits of these four boards (a rename shows as a change to the new path, or as a delete plus an
+  add), in 1-3 s per board. Paths start with the project's GUID (`\<GUID>\<path>`), and dates are in UTC.
 
 ## 5. Open questions
 1. Will Altium register altium-helper as a public desktop client (route A)?

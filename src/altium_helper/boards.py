@@ -501,6 +501,15 @@ class Board:
             self._fetch_history(f"--deepen={missing()}", lambda: missing() > 0)
         self._fetch_history("--unshallow", lambda: missing() > 0)
 
+    def ensure_depth(self, depth: int) -> None:
+        """Make sure the copy holds the latest ``depth`` commits, or all there are."""
+
+        def missing() -> int:
+            held = self._git(["rev-list", "--count", "--first-parent", "HEAD"])
+            return depth - int(held.strip())
+
+        self._fetch_history(f"--deepen={max(missing(), 1)}", lambda: missing() > 0)
+
     def find_commit(self, rev: str) -> str:
         """The full id of commit ``rev``, fetching older history if the copy doesn't reach
         it yet; "" if there's no such commit."""

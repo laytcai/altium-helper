@@ -3,11 +3,13 @@
 Nexar (your own sign-in) and the Altium 365 API (a workspace token from an admin) take
 the same queries. Neither has schematic connectivity or past revisions: those come from
 git (see boards.py). The PCB snapshot here is the fallback for boards git can't reach.
+The commit list is the same as git's history, and needs no download.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,11 +37,25 @@ query ($id: ID!) {
 }"""
 
 REVISIONS = """
-query ($id: ID!, $n: Int) {
+query ($id: ID!, $n: Int, $after: String) {
   desProjectById(id: $id) {
-    revisions(first: $n) { nodes { revisionId message author createdAt files { path kind } } }
+    revisions(first: $n, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { revisionId message author createdAt files { path kind } }
+    }
   }
 }"""
+
+REVISION_TIMES = """
+query ($id: ID!, $n: Int, $after: String) {
+  desProjectById(id: $id) {
+    revisions(first: $n, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { revisionId createdAt }
+    }
+  }
+}"""
+REVISIONS_PER_PAGE = 1000
 
 VARIANTS = (
     "query ($id: ID!) { desProjectById(id: $id) { design { variants { name } } } }"
@@ -71,6 +87,8 @@ query ($ids: [ID!]!) {
 
 BOARD_LIST_MAX_AGE = 6 * 3600  # seconds before the board list is fetched again
 THREAD_RESOLVED = 0  # DesCommentThread.status: "0 = Resolved, 1 = Active"
+FILE_STATUS = {"ADDED": "A", "MODIFIED": "M", "DELETED": "D"}  # as git log shows them
+GUID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 
 def endpoint_and_token() -> tuple[str, str]:
@@ -177,30 +195,79 @@ def comments(board: Board) -> list[dict]:
     return result
 
 
-def revisions(board: Board, limit: int = 30) -> list[dict]:
-    """Altium 365's own commit list for a board, newest first: who, when, message, files."""
+def _revision_nodes(board: Board, document: str, limit: int) -> list[dict]:
+    """The newest ``limit`` revisions (fewer if that's all), newest first."""
     if not board.project_id:
         raise api.ApiError(
             f"{board.name} wasn't found through an API, so it has no revision list"
         )
-    project = (
-        query(REVISIONS, {"id": board.project_id, "n": limit}).get("desProjectById")
-        or {}
-    )
-    nodes = (project.get("revisions") or {}).get("nodes") or []
-    commits = [
+    nodes: list[dict] = []
+    after = None
+    while len(nodes) < limit:
+        variables = {
+            "id": board.project_id,
+            "n": min(limit - len(nodes), REVISIONS_PER_PAGE),
+            "after": after,
+        }
+        project = query(document, variables).get("desProjectById")
+        page = (project or {}).get("revisions")
+        # A failed resolver: GraphQL sends null, with errors, for the field that failed,
+        # or for the whole list when one revision failed.
+        if page is None or page.get("nodes") is None:
+            raise api.ApiError(f"Altium 365 sent no revision list for {board.name}")
+        nodes += page["nodes"]
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage") or not info.get("endCursor"):
+            break
+        after = info["endCursor"]
+    return sorted(nodes, key=lambda n: n.get("createdAt") or "", reverse=True)[:limit]
+
+
+def _repository_path(path: str) -> str:
+    """A path as git shows it. Altium 365 starts each one with the project's GUID: \\<GUID>\\..."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if len(parts) > 1 and GUID.fullmatch(parts[0]):
+        parts = parts[1:]
+    return "/".join(parts)
+
+
+def revisions(board: Board, limit: int = 30) -> list[dict]:
+    """Altium 365's own commit list for a board, newest first: who, when, message, files.
+
+    It matches the board's git history: the same commits, authors, dates, messages and
+    changed files (renames aside) on all 1,341 commits checked.
+    """
+    return [
         {
             "rev": (node.get("revisionId") or "")[:10],
-            "date": node.get("createdAt"),
+            # Altium gives UTC; local time reads like git's dates.
+            "date": _time(node["createdAt"]).astimezone().isoformat(),
             "author": node.get("author"),
             "message": node.get("message") or "",
             "files": [
-                f"{f.get('kind')} {f.get('path')}" for f in node.get("files") or []
+                {
+                    "status": FILE_STATUS.get(f.get("kind") or "", "M"),
+                    "path": _repository_path(f.get("path") or ""),
+                }
+                for f in node.get("files") or []
             ],
         }
-        for node in nodes
+        for node in _revision_nodes(board, REVISIONS, limit)
     ]
-    return sorted(commits, key=lambda c: c["date"] or "", reverse=True)
+
+
+def revision_times(board: Board, limit: int = 100) -> list[tuple[str, datetime]]:
+    """Commit ids and times, newest first: enough to size a history fetch."""
+    return [
+        (node["revisionId"].lower(), _time(node["createdAt"]))
+        for node in _revision_nodes(board, REVISION_TIMES, limit)
+        if node.get("revisionId") and node.get("createdAt")
+    ]
+
+
+def _time(text: str) -> datetime:
+    text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    return datetime.fromisoformat(text)
 
 
 def _pin_names(component_ids: list[str]) -> dict[str, dict[str, str]]:

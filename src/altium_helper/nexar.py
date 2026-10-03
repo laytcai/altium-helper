@@ -10,8 +10,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import http.client
 import json
 import secrets
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -21,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from . import config
 from .api import ApiError
+from .boards import _exclusive
 
 AUTHORIZE_URL = "https://identity.nexar.com/connect/authorize"
 TOKEN_URL = "https://identity.nexar.com/connect/token"
@@ -34,6 +37,8 @@ SCOPES = [
     "design.domain",
     "offline_access",
 ]
+_REFRESHING = threading.Lock()
+_FAILED: list = []  # [monotonic time, message] of the last renewal that failed
 
 
 def _post_token(form: dict) -> dict:
@@ -50,6 +55,8 @@ def _post_token(form: dict) -> dict:
         raise ApiError(f"Nexar refused the sign-in: {detail}") from e
     except urllib.error.URLError as e:
         raise ApiError(f"Can't reach Nexar: {e.reason}") from e
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        raise ApiError(f"No usable answer from Nexar: {e!r}") from e
     token["expires_at"] = time.time() + int(token.get("expires_in", 0)) - 60
     return token
 
@@ -176,11 +183,33 @@ def _store(client_id: str, client_secret: str, token: dict) -> None:
 
 def access_token() -> str:
     """A valid Nexar access token, renewed with the refresh token when possible."""
+    stored = _signed_in()
+    if time.time() < stored.get("expires_at", 0):
+        return stored["access_token"]
+    asked = time.monotonic()
+    # One renewal at a time, across parallel tool calls and other sessions' servers,
+    # and the rest use its token: a refresh token may only work once.
+    with _REFRESHING, _exclusive(config.config_dir() / "nexar.lock"):
+        if _FAILED and _FAILED[0] >= asked:  # it failed while this call waited
+            raise ApiError(_FAILED[1])
+        stored = _signed_in()
+        if time.time() < stored.get("expires_at", 0):
+            return stored["access_token"]
+        try:
+            return _renew(stored)
+        except ApiError as e:
+            _FAILED[:] = [time.monotonic(), str(e)]
+            raise
+
+
+def _signed_in() -> dict:
     stored = config.load_credentials().get("nexar")
     if not stored:
         raise ApiError("Not signed in to Nexar. Run: altium-helper login")
-    if time.time() < stored.get("expires_at", 0):
-        return stored["access_token"]
+    return stored
+
+
+def _renew(stored: dict) -> str:
     if stored.get("refresh_token"):
         token = _post_token(
             {
@@ -190,7 +219,10 @@ def access_token() -> str:
                 "client_secret": stored["client_secret"],
             }
         )
-        _store(stored["client_id"], stored["client_secret"], token)
+        try:
+            _store(stored["client_id"], stored["client_secret"], token)
+        except OSError as e:
+            raise ApiError(f"Couldn't save the renewed Nexar sign-in: {e}") from e
         return token["access_token"]
     raise ApiError(
         "The Nexar sign-in expired (it lasts 24 hours). Run: altium-helper login"
