@@ -1,9 +1,11 @@
 """Boards: read-only local copies of Altium 365 projects, and their history.
 
-Each board is a git repository cloned without file contents (``--filter=blob:none``),
-so the full history arrives in seconds and file contents download only when a
-revision is read. Past revisions are checked out into temporary worktrees that hold
-just the project's folder.
+Each board is a git repository. A first clone holds only the latest revision
+(``--depth=1``): Altium 365's git server can't leave file contents out of a clone (it
+has no partial clone), and most of a board's history is old versions of large binary
+files. Older history is fetched when a tool needs it, only as far back as it needs.
+Past revisions are checked out into temporary worktrees that hold just the project's
+folder.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.parse import urlsplit
 
 from . import checks, config, git, netlist
@@ -33,6 +35,8 @@ else:
 # Files whose change can change the design's connectivity.
 DESIGN_SUFFIXES = (".prjpcb", ".schdoc", ".pcbdoc", ".harness", ".netlist.json")
 LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
+# What find_commit fetches older history for: a commit id, or HEAD~n and the like.
+REVISION = re.compile(r"(?:[0-9a-fA-F]{4,40}|HEAD)(?:[~^][0-9]*)*")
 # Written into .git as the last step of a clone. A copy without it was interrupted.
 COMPLETE_MARKER = "altium-helper-complete"
 # Written into .git once a clone's download finished. The set-up after it can still fail
@@ -300,7 +304,7 @@ class Board:
                 [
                     "clone",
                     "--quiet",
-                    "--filter=blob:none",
+                    "--depth=1",
                     "--no-checkout",
                     self.git_url,
                     str(self.repo),
@@ -310,6 +314,9 @@ class Board:
                 keep_fds=held,
             )
             git.make_read_only(self.repo)
+            # Keep each fetch as one pack. Loose, every new version of a large file would
+            # be a full copy on disk, and only a pack lets git's own upkeep merge them.
+            self._git(["config", "fetch.unpackLimit", "1"])
             (self.repo / ".git" / DOWNLOADED_MARKER).write_text(
                 _now().isoformat() + "\n", encoding="utf-8"
             )
@@ -414,8 +421,111 @@ class Board:
         except git.GitError:
             return ""
 
-    def last_commit_before(self, when: datetime) -> str | None:
-        """The board as it was at ``when``: its last commit before that time."""
+    # ------------------------------------------------------ history on demand
+    #
+    # A copy can be shallow: it starts at some commit whose parents it doesn't hold yet.
+    # Altium's server won't send a commit by its id, but it can send older history by
+    # count (--deepen) or by date (--shallow-since). Never fetch with --depth, or with a
+    # --shallow-since later than the copy's oldest commit: both shorten the history.
+
+    def is_shallow(self) -> bool:
+        """True while the copy lacks older history, as after a first clone."""
+        return (self.repo / ".git" / "shallow").exists()
+
+    def _oldest_commits(self) -> list[str]:
+        """The commits a shallow copy starts at, whose parents it doesn't hold."""
+        path = self.repo / ".git" / "shallow"
+        return path.read_text(encoding="utf-8").split() if path.exists() else []
+
+    def _fetch_history(self, how: str, needed: Callable[[], bool]) -> None:
+        """Fetch older history: ``--deepen=<n>``, ``--shallow-since=<date>`` or ``--unshallow``.
+
+        ``needed`` is checked again under the board lock, since a parallel call may have
+        fetched it meanwhile.
+        """
+        if not self.is_shallow() or not needed():
+            return
+        self.ensure_allowed()
+        with self._lock() as held:
+            if not self.is_shallow() or not needed():
+                return
+            self._clear_stale_git_locks()
+            self._git(["fetch", "--quiet", how, "origin"], keep_fds=held)
+            self._tidy()
+
+    def _reaches(self, when: datetime) -> bool:
+        """Does the copy hold a commit from before ``when``, to the second? Then it holds
+        the board as it was at ``when``, and a log from ``when`` on stops before the
+        copy's first commit."""
+        if not self.is_shallow():
+            return True
+        before = when.replace(microsecond=0) - timedelta(seconds=1)
+        args = ["rev-list", "-1", "--first-parent", f"--before={before.isoformat()}"]
+        return bool(self._git([*args, "HEAD"]).strip())
+
+    def ensure_since(self, when: datetime) -> None:
+        """Make sure the copy holds the board as it was at ``when``, and everything after."""
+        if self._reaches(when):
+            return
+        # Every commit held is from `when` or later, so this only deepens. It stops at the
+        # first commit from `when` on; the commit before needs one more.
+        moment = when.replace(microsecond=0).isoformat()
+        self._fetch_history(
+            f"--shallow-since={moment}", lambda: not self._reaches(when)
+        )
+        self._fetch_history("--deepen=1", lambda: not self._reaches(when))
+        # Commit times come from each member's own clock, so they can be out of order.
+        self._fetch_history("--unshallow", lambda: not self._reaches(when))
+
+    def ensure_commits(self, count: int, before: datetime | None = None) -> None:
+        """Make sure log() can list ``count`` commits (from before ``before``), or all there are."""
+        args = ["rev-list", "HEAD"]
+        if before:
+            args.insert(1, f"--before={before.isoformat()}")
+        if self.project_folder != ".":
+            args += ["--", self.project_folder]
+
+        def missing() -> int:
+            oldest = set(self._oldest_commits())  # log() leaves these out
+            listed = [c for c in self._git(args).split() if c not in oldest]
+            return count - len(listed)
+
+        for round in range(5):  # each round deepens by what's missing
+            if not self.is_shallow() or missing() <= 0:
+                return
+            if before and round == 1 and not self._reaches(before):
+                # Counting from the latest commit doesn't reach back to `before`: fetch
+                # back to it by date, then count from there.
+                self.ensure_since(before)
+                continue
+            self._fetch_history(f"--deepen={missing()}", lambda: missing() > 0)
+        self._fetch_history("--unshallow", lambda: missing() > 0)
+
+    def find_commit(self, rev: str) -> str:
+        """The full id of commit ``rev``, fetching older history if the copy doesn't reach
+        it yet; "" if there's no such commit."""
+        full = self.resolve(rev)
+        step = 16
+        while not full and self.is_shallow() and REVISION.fullmatch(rev):
+            how = f"--deepen={step}" if step <= 64 else "--unshallow"
+            self._fetch_history(how, lambda: not self.resolve(rev))
+            step *= 2
+            full = self.resolve(rev)
+        return full
+
+    def parent(self, rev: str) -> str | None:
+        """The commit before ``rev``, fetched if the copy starts at ``rev``; None for the first."""
+        full = self.resolve(rev) or rev
+        self._fetch_history("--deepen=1", lambda: full in self._oldest_commits())
+        return self.resolve(f"{full}^") or None
+
+    def last_commit_before(self, when: datetime, exact: bool = False) -> str | None:
+        """The board as it was at ``when``: its last commit before that time.
+
+        With ``exact``, the commit that last changed the project's folder, not just one
+        holding the same files: a shallow copy's first commit seems to change them all.
+        """
+        self.ensure_since(when)
         args = [
             "rev-list",
             "-1",
@@ -423,9 +533,19 @@ class Board:
             f"--before={when.isoformat()}",
             "HEAD",
         ]
-        if self.project_folder != ".":
-            args += ["--", self.project_folder]
-        return self._git(args).strip() or None
+        if self.project_folder == ".":
+            return self._git(args).strip() or None
+        args += ["--", self.project_folder]
+        found = self._git(args).strip() or None
+        step = 1
+        while exact and found in self._oldest_commits():
+            self._fetch_history(
+                f"--deepen={step}", lambda: found in self._oldest_commits()
+            )
+            if found in self._oldest_commits():
+                break
+            found, step = self._git(args).strip() or None, step * 2
+        return found
 
     def log(
         self,
@@ -447,9 +567,14 @@ class Board:
         args += [f"-n{limit}", revision_range or "HEAD"]
         if self.project_folder != ".":
             args += ["--", self.project_folder]  # only this board's commits
+        # A shallow copy's first commit lists every file as added: it has no parent to
+        # compare with. Callers fetch enough history first; this keeps it out regardless.
+        oldest = set(self._oldest_commits())
         commits = []
         for record in self._git(args).split("\x1e")[1:]:
             full, author, date, subject, body, changes = record.split("\x1f", 5)
+            if full in oldest:
+                continue
             files = []
             for line in changes.strip().splitlines():
                 status, *paths = line.split("\t")
@@ -501,7 +626,7 @@ class Board:
         Returns ``{"rev", "netlist_path", "netlist", "check"}``; ``netlist`` is None when the
         project doesn't exist at that revision.
         """
-        full = self.resolve(rev)
+        full = self.find_commit(rev)
         if not full:
             raise BoardError(f"{self.name}: no revision {rev!r}")
         with self._lock():  # a parallel call waits, then reads the cache

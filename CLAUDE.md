@@ -38,7 +38,8 @@ Possible next steps:
   - `setup_cmd`: finds `claude` (on PATH or bundled in an editor extension) and registers the servers and the
     skill.
 - **Boards and history:**
-  - `boards`: board registry, blobless clones, sparse worktrees, cached per-revision analysis.
+  - `boards`: board registry, shallow clones with history fetched on demand, sparse worktrees, cached
+    per-revision analysis.
   - `git`: runs git, handles credentials, adds the read-only guards.
   - `history`: history and changes over a range.
   - `diff`: netlist comparison (moves, swaps, rotations, renames, parts).
@@ -91,6 +92,15 @@ repository fixture is there too.
 - **MCP Python SDK 2.x** renamed `FastMCP` to `MCPServer` (`mcp.server.mcpserver`). It runs plain (non-async) tools
   on worker threads, so parallel tool calls really run at once: anything touching a board's files goes through
   `Board._lock`.
+- **Altium 365's git server** (Git for Windows behind ASP.NET, protocol v0 only):
+  - has no partial clone: `--filter=blob:none` silently downloads every version of every file, and `--quiet`
+    hides git's warning;
+  - won't send a commit by its id, but supports `--depth`, `--deepen` and `--shallow-since`;
+  - builds each download from scratch and sends nothing until it's done, so a fetch costs about 2-4 s plus time
+    per new object, whatever its size.
+
+  Never fetch with `--depth`, or with a `--shallow-since` later than a copy's oldest commit: both shorten the
+  history.
 - **Altium 365 commits often have no message**, because Altium doesn't ask for one. Python's `str.strip()` treats
   the `\x1f` separator in our git formats as whitespace, so never strip before splitting on it.
 - **Nexar comment threads:** `status` 0 means resolved, 1 means active.
