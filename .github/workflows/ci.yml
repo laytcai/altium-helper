@@ -18,7 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no floating major tags after v7; its README pins a commit.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
       - name: Cache the public test boards
