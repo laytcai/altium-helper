@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import configparser
+import re
 from pathlib import Path
 
 from . import netlist as netlist_tool
@@ -53,7 +54,29 @@ def channel_naming(prjpcb: Path) -> pcbdoc.ChannelNaming:
         format=design.get("ChannelDesignatorFormatString") or "$Component_$RoomName",
         room_style=int(style) if style.isdigit() else 0,
         level_separator=design.get("ChannelRoomLevelSeperator") or "_",
+        placements=annotation_placements(prjpcb),
     )
+
+
+def annotation_placements(prjpcb: Path) -> dict[str, tuple[str, str]]:
+    """Each placed part's (room, document) by unique-ID path, from the ``.Annotation`` file."""
+    path = Path(prjpcb).with_suffix(".Annotation")
+    try:
+        text = path.read_text(encoding="latin-1")
+    except OSError:
+        return {}
+    fields: dict[str, dict[str, str]] = {}
+    for line in text.splitlines():
+        match = re.match(r"(UniqueID|ChannelName|DocumentName)(\d+)=(.*)", line.strip())
+        if match:
+            fields.setdefault(match.group(2), {})[match.group(1)] = match.group(
+                3
+            ).strip()
+    return {
+        entry["UniqueID"]: (entry["ChannelName"], entry.get("DocumentName", "").lower())
+        for entry in fields.values()
+        if entry.get("UniqueID") and entry.get("ChannelName")
+    }
 
 
 def compare_with_pcb(

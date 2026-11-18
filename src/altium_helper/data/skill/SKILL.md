@@ -27,6 +27,9 @@ Never ask the user to download files, and never try to change anything in Altium
   updated from the schematic, or the reader missed a connection.
 
 ## universal-netlist quirks
+- Repeated sheets are expanded per channel (`U9_V1`, `U9_V2`, or `C32A`/`C32B`), and a designator
+  reused on different sheets is split per sheet (`C10_Power`, `C10_U_Rev12 Debug`). Search by
+  pattern (`search_components_by_refdes "^U9"`) when a plain designator isn't found.
 - `query_xnet_by_pin_name` wants `REFDES.PINNUMBER` (`U3.12`). Look the number up with `query_component` first.
 - Traces pass through resistors, capacitors, inductors and ferrites only. They stop at solder bridges (SB) and
   jumpers (JP): note the part and continue from its other pin.

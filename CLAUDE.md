@@ -109,8 +109,19 @@ repository fixture is there too.
 - **Altium 365 commits often have no message**, because Altium doesn't ask for one. Python's `str.strip()` treats
   the `\x1f` separator in our git formats as whitespace, so never strip before splitting on it.
 - **Nexar comment threads:** `status` 0 means resolved, 1 means active.
-- **Multi-channel `.PcbDoc`** stores logical designators. The board designator is `SOURCEDESIGNATOR`, then `_`,
-  then the room name from `SOURCEHIERARCHICALPATH`.
+- **universal-netlist is patched after install** (`netlist_patches`, applied by `netlist.install` and
+  re-checked before every run). 1.12.0 (and 1.15.0) can't match a sheet symbol whose file name has no
+  extension (`Power`, as PER's projects store it), so it never expanded repeated sheets or linked their
+  ports; and it merges parts that reuse a designator on separately placed sheets (a shared debug sheet's
+  `C10` and the power sheet's). Patched names: channels by the project's format (`U9_V1`, `C32A`),
+  reused designators as `<designator>_<sheet symbol>` (`C10_Power`); parts of one multi-part symbol
+  (same part, disjoint pins) stay one part. Patches start from `<file>.orig`; a bump must revisit
+  them. Cached revision netlists carry the netlister tag (`revisions/netlister.txt`) and are redone
+  when it changes.
+- **`.PcbDoc` designators** are logical (`SOURCEDESIGNATOR`). `pcbdoc` names the copies to match the
+  patched netlist: a sheet placed several times by the channel format (channels in their rooms'
+  natural order; rooms from the `.Annotation` file by `SOURCEUNIQUEID`, since symbols sharing a
+  designator share a path), a designator reused across sheets as `<designator>_<room>`.
 
 ## Firmware monorepo (Penn-Electric-Racing, e.g. `~/github/per/Penn-Electric-Racing`)
 - **STM32 pin definitions:** `embedded/boards/*/*Pins.hpp`, e.g. `const Pin framMosi = PC12;`. Known mismatch:

@@ -8,8 +8,9 @@ A .PcbDoc is an OLE compound file. Three of its streams matter here:
 from __future__ import annotations
 
 import collections
+import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import olefile
@@ -32,6 +33,11 @@ class ChannelNaming:
     format: str = "$Component_$RoomName"
     room_style: int = 0
     level_separator: str = "_"
+    # Where each part was placed, by SOURCEUNIQUEID ("\\SYMBOL\\PART"): (room, document),
+    # from the project's .Annotation file. Sheet symbols that share a designator (three
+    # symbols named "V") give their parts the same hierarchical path; only the annotation
+    # says which is V1, V2 or V3, and which document a part came from.
+    placements: dict[str, tuple[str, str]] = field(default_factory=dict, compare=False)
 
 
 def _text_records(data: bytes) -> list[dict[str, str]]:
@@ -50,34 +56,82 @@ def _text_records(data: bytes) -> list[dict[str, str]]:
     return records
 
 
+_FORMAT_TOKEN = re.compile(
+    r"\$(ComponentPrefix|ComponentIndex|ChannelIndex|ChannelAlpha|Component|RoomName)"
+)
+
+
+def _natural(text: str) -> list:
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", text)]
+
+
+def _channel_designator(
+    naming: ChannelNaming, designator: str, room: str, channel: int
+) -> str:
+    """Apply the project's channel designator format (``$Component$ChannelAlpha`` → ``C32B``)."""
+    prefix = re.match(r"\D*", designator).group(0)
+    tokens = {
+        "ComponentPrefix": prefix,
+        "ComponentIndex": designator[len(prefix) :],
+        "ChannelIndex": str(channel),
+        "ChannelAlpha": chr(64 + max(1, channel)),
+        "Component": designator,
+        "RoomName": room,
+    }
+    return _FORMAT_TOKEN.sub(lambda m: tokens[m.group(1)], naming.format)
+
+
 def _physical_designators(
     components: list[dict[str, str]], naming: ChannelNaming
 ) -> list[str]:
-    """Give each component the designator printed on the board.
+    """Give each component the designator the schematic netlist uses for it.
 
     The file stores the designator from the schematic sheet (``SOURCEDESIGNATOR``).
-    In a multi-channel design every copy of a sheet repeats it (``J4`` five times),
-    and the board designator adds the channel's room name (``J4_U_bob_0``).
+    - A sheet placed several times repeats it in every channel (``J4`` five times): the
+      project's channel designator format names each copy (``J4_U_bob_0``, ``C32A``),
+      channels numbered in their rooms' natural order.
+    - A designator reused on different sheets (a shared debug sheet's ``C10`` and the power
+      sheet's) names a different part on each: ``<designator>_<room>`` (``C10_Power``).
+    These match the names altium-helper's patched universal-netlist gives the same parts.
     """
     logical = [c.get("SOURCEDESIGNATOR", "?") for c in components]
     counts = collections.Counter(logical)
-    names = []
-    for component, designator in zip(components, logical):
-        if counts[designator] == 1:
-            names.append(designator)
+    where: list[tuple[str, str | None]] = []
+    for component in components:
+        placed = naming.placements.get(component.get("SOURCEUNIQUEID", ""))
+        if placed:
+            where.append(placed)
             continue
         path = [p for p in component.get("SOURCEHIERARCHICALPATH", "").split("\\") if p]
         # The first element is the top sheet; the rest are the channel rooms.
         rooms = path[1:] if len(path) > 1 else path
-        if not rooms:
+        room = (
+            ""
+            if not rooms
+            else (
+                rooms[-1]
+                if naming.room_style == 0
+                else naming.level_separator.join(rooms)
+            )
+        )
+        where.append((room, None))
+    # The rooms of each document (without an annotation, of each designator), in channel order.
+    groups: dict[str, set[str]] = collections.defaultdict(set)
+    for designator, (room, document) in zip(logical, where):
+        groups[document or f"#{designator}"].add(room)
+    ordered = {key: sorted(rooms, key=_natural) for key, rooms in groups.items()}
+    names = []
+    for designator, (room, document) in zip(logical, where):
+        if counts[designator] == 1 or not room:
             names.append(designator)
             continue
-        room = (
-            rooms[-1] if naming.room_style == 0 else naming.level_separator.join(rooms)
-        )
-        names.append(
-            naming.format.replace("$Component", designator).replace("$RoomName", room)
-        )
+        rooms = ordered[document or f"#{designator}"]
+        if len(rooms) > 1:
+            names.append(
+                _channel_designator(naming, designator, room, rooms.index(room) + 1)
+            )
+        else:
+            names.append(f"{designator}_{room}")
     return names
 
 
