@@ -125,6 +125,21 @@ def test_revisions_are_cached(board):
     assert cached.stat().st_mtime_ns == stamp
 
 
+def test_a_new_netlister_redoes_cached_analyses(board, monkeypatch):
+    from altium_helper import netlist
+
+    board.sync()
+    cached = Path(board.analyze("HEAD")["netlist_path"])
+    stamp = cached.stat().st_mtime_ns
+    monkeypatch.setattr(netlist, "netlister_tag", lambda: "9.9.9+different")
+    time.sleep(0.01)
+    assert "U3" in board.analyze("HEAD")["netlist"]["components"]
+    assert cached.stat().st_mtime_ns != stamp
+    assert (
+        board.revisions_dir / "netlister.txt"
+    ).read_text().strip() == "9.9.9+different"
+
+
 def test_excluded_board_is_never_fetched(board):
     settings = config.Settings.load()
     settings.exclude = ["DAQ"]

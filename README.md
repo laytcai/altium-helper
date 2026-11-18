@@ -266,6 +266,10 @@ it started with.
 - **Git needs an Altium password** (route B). An account that signs in with Google has none, so it needs route C
   or gets the PCB fallback.
 - **History only covers what's been saved to Altium 365.** Unsaved work in someone's Altium Designer is invisible.
+- **universal-netlist is patched** for two bugs that hit PER boards: sheet symbols that name their file
+  without `.SchDoc` (so repeated sheets weren't expanded), and designators reused on separately placed
+  sheets (merged into one part). See `netlist_patches.py`. Parts then read as `U9_V1` (channel `V1`)
+  and `C10_Power` (the power sheet's `C10`).
 - **universal-netlist's trace tool** has quirks. The skill warns Claude about each one, and `check` compares
   against the PCB.
   - It takes pin *numbers* (`U3.12`).

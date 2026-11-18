@@ -642,6 +642,24 @@ class Board:
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def _drop_stale_analyses(self) -> None:
+        """Forget cached netlists and checks made by another netlister (version or patches)."""
+        tag_file = self.revisions_dir / "netlister.txt"
+        tag = netlist.netlister_tag()
+        with _exclusive(self.revisions_dir / "locks" / "netlister.lock"):
+            try:
+                current = tag_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                current = None
+            if current == tag:
+                return
+            for stale in [
+                *self.revisions_dir.glob("*.netlist.json"),
+                *self.revisions_dir.glob("*.check.json"),
+            ]:
+                stale.unlink(missing_ok=True)
+            tag_file.write_text(tag + "\n", encoding="utf-8")
+
     def analyze(self, rev: str) -> dict:
         """Netlist and schematic-vs-PCB check of one revision, cached by commit.
 
@@ -652,6 +670,7 @@ class Board:
         if not full:
             raise BoardError(f"{self.name}: no revision {rev!r}")
         self.revisions_dir.mkdir(parents=True, exist_ok=True)
+        self._drop_stale_analyses()
         netlist_path = self.revisions_dir / f"{full}.netlist.json"
         check_path = self.revisions_dir / f"{full}.check.json"
         # A parallel call on the same revision waits, then reads the cache.

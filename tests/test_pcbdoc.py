@@ -48,3 +48,62 @@ def test_non_pcb_file_is_rejected(tmp_path):
         assert "Board.PcbDoc" in str(e)
     else:
         raise AssertionError("expected PcbDocError")
+
+
+def test_channel_alpha_numbers_channels_in_room_order():
+    components = [
+        {"SOURCEDESIGNATOR": "C32", "SOURCEHIERARCHICALPATH": "DASH\\U_CAN_PRIORITY"},
+        {"SOURCEDESIGNATOR": "C32", "SOURCEHIERARCHICALPATH": "DASH\\U_CAN_GP"},
+    ]
+    naming = pcbdoc.ChannelNaming(format="$Component$ChannelAlpha")
+    assert pcbdoc._physical_designators(components, naming) == ["C32B", "C32A"]
+
+
+def test_annotation_names_channels_that_share_a_path():
+    # Three sheet symbols all named "V": one path, told apart only by the annotation.
+    components = [
+        {
+            "SOURCEDESIGNATOR": "U9",
+            "SOURCEHIERARCHICALPATH": "PCM\\V",
+            "SOURCEUNIQUEID": f"\\S{i}\\P",
+        }
+        for i in (1, 2, 3)
+    ]
+    naming = pcbdoc.ChannelNaming(
+        placements={
+            "\\S1\\P": ("V3", "analog input channel.schdoc"),
+            "\\S2\\P": ("V1", "analog input channel.schdoc"),
+            "\\S3\\P": ("V2", "analog input channel.schdoc"),
+        }
+    )
+    assert pcbdoc._physical_designators(components, naming) == [
+        "U9_V3",
+        "U9_V1",
+        "U9_V2",
+    ]
+
+
+def test_a_designator_reused_on_different_sheets_takes_its_room():
+    components = [
+        {
+            "SOURCEDESIGNATOR": "C10",
+            "SOURCEHIERARCHICALPATH": "PCM\\Power",
+            "SOURCEUNIQUEID": "\\A\\X",
+        },
+        {
+            "SOURCEDESIGNATOR": "C10",
+            "SOURCEHIERARCHICALPATH": "PCM\\U_Rev12 Debug",
+            "SOURCEUNIQUEID": "\\B\\Y",
+        },
+    ]
+    naming = pcbdoc.ChannelNaming(
+        format="$Component_$ChannelAlpha",  # would give C10_A twice
+        placements={
+            "\\A\\X": ("Power", "power.schdoc"),
+            "\\B\\Y": ("U_Rev12 Debug", "sch-0000-7.schdoc"),
+        },
+    )
+    assert pcbdoc._physical_designators(components, naming) == [
+        "C10_Power",
+        "C10_U_Rev12 Debug",
+    ]

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from nodejs_wheel import executable as nodejs
 
-from . import config
+from . import config, netlist_patches
 
 PACKAGE = "@intelligentelectron/universal-netlist"
 
@@ -113,7 +113,25 @@ def install(force: bool = False) -> str:
         raise NetlistError(
             f"npm ci failed in {target}:\n{result.stderr.strip() or result.stdout.strip()}"
         )
+    _patch()
     return pinned_version()
+
+
+def _altium_parser_dir() -> Path:
+    return _package_dir() / "dist" / "parsers" / "altium"
+
+
+def _patch() -> None:
+    """Apply :mod:`netlist_patches`; a mismatch means the pin and the patches disagree."""
+    try:
+        netlist_patches.apply(_altium_parser_dir())
+    except netlist_patches.PatchError as e:
+        raise NetlistError(str(e)) from e
+
+
+def netlister_tag() -> str:
+    """Which netlister made a netlist: the universal-netlist version plus our patch level."""
+    return f"{installed_version() or pinned_version()}+{netlist_patches.level()}"
 
 
 def _require_installed() -> None:
@@ -121,6 +139,13 @@ def _require_installed() -> None:
         raise NetlistError(
             "universal-netlist isn't installed yet. Run: altium-helper setup"
         )
+    if not netlist_patches.is_applied(_altium_parser_dir()):
+        # An install from before these patches, or patched by an older version of them:
+        # patch it, or start from a clean copy if its files no longer match.
+        try:
+            _patch()
+        except NetlistError:
+            install(force=True)
 
 
 def serve() -> int:

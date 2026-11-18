@@ -61,3 +61,20 @@ def test_project_documents_and_case_insensitive_lookup(tmp_path):
     report = checks.check_project(project)
     assert report["missing_documents"] == ["Board.PcbDoc"]
     assert report["pcb"] == []
+
+
+def test_annotation_placements_map_unique_ids_to_room_and_document(tmp_path):
+    prj = tmp_path / "Board.PrjPcb"
+    prj.write_text("[Design]\n")
+    (tmp_path / "Board.Annotation").write_text(
+        "[DesignatorManager]\n"
+        "LogicalDesignator0=U9\nDocumentName0=Analog Input Channel.SchDoc\nChannelName0=V1\n"
+        "UniqueID0=\\AFAB\\GJVG\nPhysicalDesignator0=U31\n"
+        "LogicalDesignator1=C10\nDocumentName1=Power.SchDoc\nChannelName1=Power\n"
+        "UniqueID1=\\UCON\\VDEX\nPhysicalDesignator1=C61\n"
+    )
+    assert checks.annotation_placements(prj) == {
+        "\\AFAB\\GJVG": ("V1", "analog input channel.schdoc"),
+        "\\UCON\\VDEX": ("Power", "power.schdoc"),
+    }
+    assert checks.annotation_placements(tmp_path / "Missing.PrjPcb") == {}
